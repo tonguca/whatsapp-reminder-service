@@ -1,0 +1,22 @@
+{
+  "name": "whatsapp-reminder-service",
+  "version": "1.0.0",
+  "description": "$1/month WhatsApp reminder bot with human touch",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "twilio": "^4.19.0",
+    "node-cron": "^3.0.3",
+    "dotenv": "^16.3.1"
+  },
+  "engines": {
+    "node": "18.x"
+  },
+  "keywords": ["whatsapp", "reminder", "bot", "assistant"],
+  "author": "Your Name",
+  "license": "MIT"
+}
