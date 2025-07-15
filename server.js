@@ -1,290 +1,340 @@
 require('dotenv').config();
 const express = require('express');
-const twilio = require('twilio');
+const mongoose = require('mongoose');
 const cron = require('node-cron');
+const chrono = require('chrono-node');
+const axios = require('axios');
 
 const app = express();
-app.use(express.urlencoded({ extended: true }));
+const PORT = process.env.PORT || 10000;
 
-// Twilio setup
-const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
+// Middleware
+app.use(express.json());
 
-// In-memory storage
-let reminders = [];
-let userProfiles = {};
-
-// Motivational messages
-const motivationalMessages = {
-  meeting: ["🤝 Good luck with your meeting! You've got this!", "💼 Time for your meeting! Go show them what you're made of!"],
-  call: ["📞 Time to make that call! They'll be happy to hear from you!", "☎️ Call time! You're great at staying connected!"],
-  family: ["👨‍👩‍👧‍👦 Family time! These moments are precious!", "❤️ Time to connect with family! Love is everything!"],
-  dentist: ["🦷 Dentist time! Hope it goes smoothly and painlessly!", "🦷 Dental appointment! Taking care of your health is awesome!"],
-  doctor: ["🏥 Doctor appointment time. Hope everything goes well!", "👩‍⚕️ Medical appointment! You're doing great taking care of yourself!"],
-  medicine: ["💊 Medicine reminder! Taking care of yourself is important!", "💊 Time for your medicine! Your health matters!"],
-  workout: ["💪 Workout time! You're crushing your fitness goals!", "🏋️ Exercise time! Your body will thank you!"],
-  work: ["💼 Work reminder! You're doing amazing things!", "📋 Task time! You've got this handled!"],
-  birthday: ["🎂 Birthday reminder! Make someone's day special!", "🎉 It's party time! Birthdays are magical!"],
-  default: ["🔔 Reminder time! You've got this!", "⏰ Time for your reminder! Hope your day is going great!"]
+// Environment variables validation
+const requiredEnvVars = {
+  VERIFY_TOKEN: process.env.VERIFY_TOKEN,
+  WHATSAPP_TOKEN: process.env.WHATSAPP_TOKEN,
+  PHONE_NUMBER_ID: process.env.PHONE_NUMBER_ID,
+  MONGODB_URI: process.env.MONGODB_URI
 };
 
-// Parse reminder from message
-function parseReminder(message) {
-  const text = message.toLowerCase().trim();
+// Check for missing environment variables
+const missingVars = Object.entries(requiredEnvVars)
+  .filter(([key, value]) => !value)
+  .map(([key]) => key);
+
+if (missingVars.length > 0) {
+  console.error('Missing required environment variables:', missingVars);
+  console.error('Please set these variables in your Render dashboard');
+  process.exit(1);
+}
+
+// MongoDB connection
+mongoose.connect(process.env.MONGODB_URI, {
+  useNewUrlParser: true,
+  useUnifiedTopology: true,
+})
+.then(() => console.log('Connected to MongoDB'))
+.catch(err => {
+  console.error('MongoDB connection error:', err);
+  process.exit(1);
+});
+
+// Reminder Schema
+const reminderSchema = new mongoose.Schema({
+  userId: { type: String, required: true },
+  userName: { type: String, required: true },
+  message: { type: String, required: true },
+  scheduledTime: { type: Date, required: true },
+  isCompleted: { type: Boolean, default: false },
+  createdAt: { type: Date, default: Date.now }
+});
+
+const Reminder = mongoose.model('Reminder', reminderSchema);
+
+// WhatsApp API functions
+async function sendWhatsAppMessage(to, message) {
+  try {
+    const response = await axios.post(
+      `https://graph.facebook.com/v17.0/${process.env.PHONE_NUMBER_ID}/messages`,
+      {
+        messaging_product: 'whatsapp',
+        to: to,
+        text: { body: message },
+        type: 'text'
+      },
+      {
+        headers: {
+          'Authorization': `Bearer ${process.env.WHATSAPP_TOKEN}`,
+          'Content-Type': 'application/json'
+        }
+      }
+    );
+    console.log('Message sent successfully:', response.data);
+    return response.data;
+  } catch (error) {
+    console.error('Error sending WhatsApp message:', error.response?.data || error.message);
+    throw error;
+  }
+}
+
+// Context detection for human touches
+function detectContext(messageText) {
+  const text = messageText.toLowerCase();
   
-  let task = '';
-  const remindPatterns = [
-    /remind me (?:to )?(.+?) (?:at|tomorrow|in \d+|on)/i,
-    /remind me (?:to )?(.+)/i
-  ];
-  
-  for (const pattern of remindPatterns) {
-    const match = text.match(pattern);
-    if (match) {
-      task = match[1].trim();
-      break;
+  const contexts = {
+    family: {
+      keywords: ['call mom', 'call dad', 'call family', 'call mother', 'call father', 'call sister', 'call brother', 'family call', 'parents'],
+      emoji: '💕',
+      encouragement: 'Family time is precious! 💕',
+      reminder: '👨‍👩‍👧‍👦 Don\'t forget to call your loved ones!'
+    },
+    meeting: {
+      keywords: ['meeting', 'conference', 'zoom', 'teams', 'work call', 'presentation', 'interview'],
+      emoji: '🤝',
+      encouragement: 'You\'ve got this! Good luck with your meeting! 🤝',
+      reminder: '💼 Time for your meeting! Go show them what you\'re made of!'
+    },
+    health: {
+      keywords: ['doctor', 'appointment', 'dentist', 'clinic', 'hospital', 'checkup', 'medical'],
+      emoji: '🏥',
+      encouragement: 'Taking care of your health is so important! 🏥',
+      reminder: '⚕️ Health comes first! Time for your appointment!'
+    },
+    workout: {
+      keywords: ['gym', 'workout', 'exercise', 'run', 'jog', 'fitness', 'yoga', 'training'],
+      emoji: '💪',
+      encouragement: 'Your future self will thank you! 💪',
+      reminder: '🔥 Time to get moving! Your body will love you for this!'
+    },
+    celebration: {
+      keywords: ['birthday', 'anniversary', 'party', 'celebration', 'congratulate'],
+      emoji: '🎉',
+      encouragement: 'Celebrations make life beautiful! 🎉',
+      reminder: '🎂 Time to celebrate! Don\'t miss this special moment!'
+    },
+    medication: {
+      keywords: ['medicine', 'pills', 'medication', 'tablets', 'dose'],
+      emoji: '💊',
+      encouragement: 'Staying healthy is the best investment! 💊',
+      reminder: '⏰ Time for your medicine! Your health matters!'
+    },
+    food: {
+      keywords: ['eat', 'lunch', 'dinner', 'breakfast', 'meal', 'food'],
+      emoji: '🍽️',
+      encouragement: 'Nourishing your body is an act of self-love! 🍽️',
+      reminder: '🥗 Time to fuel your amazing body!'
+    },
+    work: {
+      keywords: ['deadline', 'project', 'task', 'work', 'submit', 'finish'],
+      emoji: '⚡',
+      encouragement: 'You\'re capable of amazing things! ⚡',
+      reminder: '🎯 Time to tackle that task! You\'ve got this!'
     }
-  }
-  
-  const timePatterns = [
-    /(?:at )?(\d{1,2})(?::(\d{2}))?\s*(am|pm)/i,
-    /(?:at )?(\d{1,2})(?::(\d{2}))?/i
-  ];
-  
-  let timeMatch = null;
-  for (const pattern of timePatterns) {
-    const match = text.match(pattern);
-    if (match) {
-      timeMatch = match;
-      break;
-    }
-  }
-  
-  let targetDate = new Date();
-  if (text.includes('tomorrow')) {
-    targetDate.setDate(targetDate.getDate() + 1);
-  } else if (text.includes('in 2 days')) {
-    targetDate.setDate(targetDate.getDate() + 2);
-  } else if (text.includes('in 3 days')) {
-    targetDate.setDate(targetDate.getDate() + 3);
-  }
-  
-  return { task, timeMatch, targetDate };
-}
-
-// Get motivational message
-function getMotivationalMessage(task) {
-  const lowerTask = task.toLowerCase();
-  
-  if (lowerTask.includes('meeting')) return motivationalMessages.meeting[Math.floor(Math.random() * motivationalMessages.meeting.length)];
-  if (lowerTask.includes('mom') || lowerTask.includes('dad') || lowerTask.includes('family')) return motivationalMessages.family[Math.floor(Math.random() * motivationalMessages.family.length)];
-  if (lowerTask.includes('call')) return motivationalMessages.call[Math.floor(Math.random() * motivationalMessages.call.length)];
-  if (lowerTask.includes('dentist')) return motivationalMessages.dentist[Math.floor(Math.random() * motivationalMessages.dentist.length)];
-  if (lowerTask.includes('doctor')) return motivationalMessages.doctor[Math.floor(Math.random() * motivationalMessages.doctor.length)];
-  if (lowerTask.includes('medicine')) return motivationalMessages.medicine[Math.floor(Math.random() * motivationalMessages.medicine.length)];
-  if (lowerTask.includes('workout') || lowerTask.includes('gym')) return motivationalMessages.workout[Math.floor(Math.random() * motivationalMessages.workout.length)];
-  if (lowerTask.includes('work')) return motivationalMessages.work[Math.floor(Math.random() * motivationalMessages.work.length)];
-  if (lowerTask.includes('birthday')) return motivationalMessages.birthday[Math.floor(Math.random() * motivationalMessages.birthday.length)];
-  
-  return motivationalMessages.default[Math.floor(Math.random() * motivationalMessages.default.length)];
-}
-
-// Send message
-function sendMessage(to, body) {
-  if (!process.env.TWILIO_ACCOUNT_SID || process.env.TWILIO_ACCOUNT_SID === 'your_account_sid_here') {
-    console.log(`Would send to ${to}: ${body}`);
-    return;
-  }
-  
-  client.messages
-    .create({
-      from: process.env.TWILIO_WHATSAPP_NUMBER,
-      to: to,
-      body: body
-    })
-    .then(message => console.log(`Sent: ${message.sid}`))
-    .catch(err => console.error('Error:', err));
-}
-
-// Complete reminder
-function completeReminder(from, ampm) {
-  const profile = userProfiles[from];
-  if (!profile) return;
-  
-  scheduleReminder(from, profile.task, profile.targetDate, profile.hour, profile.minute, ampm);
-  delete userProfiles[from];
-}
-
-// Schedule reminder
-function scheduleReminder(from, task, targetDate, hour, minute, ampm) {
-  let hour24 = hour;
-  if (ampm && ampm.toLowerCase() === 'pm' && hour !== 12) hour24 += 12;
-  if (ampm && ampm.toLowerCase() === 'am' && hour === 12) hour24 = 0;
-  
-  targetDate.setHours(hour24, minute || 0, 0, 0);
-  
-  if (targetDate <= new Date()) {
-    sendMessage(from, "⚠️ That time has already passed! Please set a future time.");
-    return;
-  }
-  
-  const earlyDate = new Date(targetDate.getTime() - 30 * 60000);
-  
-  const reminder = {
-    id: Date.now() + Math.random(),
-    from: from,
-    task: task,
-    scheduledTime: targetDate,
-    earlyTime: earlyDate,
-    completed: false,
-    earlySent: false
   };
   
-  reminders.push(reminder);
+  for (const [contextName, contextData] of Object.entries(contexts)) {
+    if (contextData.keywords.some(keyword => text.includes(keyword))) {
+      return contextData;
+    }
+  }
   
-  const dateStr = targetDate.toLocaleDateString('en-US', { 
-    weekday: 'long', 
-    year: 'numeric', 
-    month: 'long', 
-    day: 'numeric' 
-  });
-  const timeStr = targetDate.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
-  
-  const confirmMessage = `✅ Perfect! Reminder set:
-📝 Task: ${task}
-📅 Date: ${dateStr}
-⏰ Time: ${timeStr}
-
-🔔 I'll give you a heads up 30 minutes early and remind you again at the exact time!
-
-${getMotivationalMessage(task)}`;
-
-  sendMessage(from, confirmMessage);
+  return {
+    emoji: '⭐',
+    encouragement: 'I\'ll make sure you don\'t forget! ⭐',
+    reminder: '🔔 Here\'s your friendly reminder!'
+  };
 }
 
-// WhatsApp webhook
-app.post('/webhook', (req, res) => {
-  const message = req.body.Body || '';
-  const from = req.body.From || '';
+// Parse reminder from message
+function parseReminder(messageText) {
+  const parsed = chrono.parseDate(messageText);
+  if (!parsed) return null;
   
-  console.log(`Received: "${message}" from ${from}`);
+  // Extract the reminder message (everything before the time phrase)
+  const timeMatch = messageText.match(/\s+(at|on|in|tomorrow|today|next)\s+/i);
+  let reminderText = messageText;
   
-  if (userProfiles[from] && userProfiles[from].waitingForAmPm) {
-    const choice = message.trim().toLowerCase();
-    if (choice === '1' || choice.includes('am')) {
-      completeReminder(from, 'AM');
-    } else if (choice === '2' || choice.includes('pm')) {
-      completeReminder(from, 'PM');
-    } else {
-      sendMessage(from, "Please choose:\n1️⃣ AM\n2️⃣ PM");
-    }
-    res.status(200).send();
-    return;
+  if (timeMatch) {
+    reminderText = messageText.substring(0, timeMatch.index).trim();
   }
   
-  if (message.toLowerCase().includes('remind me')) {
-    const parsed = parseReminder(message);
-    
-    if (!parsed.task) {
-      sendMessage(from, "I'd love to help! Please tell me what to remind you about. Try:\n'Remind me to call mom tomorrow at 6pm'");
-    } else if (parsed.timeMatch) {
-      const hour = parseInt(parsed.timeMatch[1]);
-      const minute = parsed.timeMatch[2] ? parseInt(parsed.timeMatch[2]) : 0;
-      const ampm = parsed.timeMatch[3];
-      
-      if (!ampm && hour >= 1 && hour <= 12) {
-        userProfiles[from] = {
-          waitingForAmPm: true,
-          task: parsed.task,
-          hour: hour,
-          minute: minute,
-          targetDate: parsed.targetDate
-        };
-        
-        const timeStr = `${hour}:${minute.toString().padStart(2, '0')}`;
-        sendMessage(from, `📅 Got it! Is ${timeStr} in the morning or evening?\n\n1️⃣ AM (morning)\n2️⃣ PM (evening)`);
-      } else {
-        scheduleReminder(from, parsed.task, parsed.targetDate, hour, minute, ampm);
-      }
+  const context = detectContext(messageText);
+  
+  return {
+    message: reminderText || 'Reminder',
+    scheduledTime: parsed,
+    context: context
+  };
+}
+
+// Webhook verification
+app.get('/webhook', (req, res) => {
+  const mode = req.query['hub.mode'];
+  const token = req.query['hub.verify_token'];
+  const challenge = req.query['hub.challenge'];
+
+  if (mode && token) {
+    if (mode === 'subscribe' && token === process.env.VERIFY_TOKEN) {
+      console.log('Webhook verified successfully');
+      res.status(200).send(challenge);
     } else {
-      sendMessage(from, `I'd love to remind you about "${parsed.task}"! \n\nPlease include a time like:\n'Remind me to ${parsed.task} tomorrow at 6pm'`);
+      console.error('Webhook verification failed');
+      res.sendStatus(403);
     }
-  } else if (message.toLowerCase().includes('help')) {
-    sendMessage(from, `👋 Hi! I'm your personal reminder assistant! 
-
-Here's how I work:
-- Say "Remind me to [task] at [time]"
-- I'll send you motivational reminders
-- 30 minutes early + right on time
-
-Examples:
-📞 "Remind me to call mom tomorrow at 6pm"
-🦷 "Remind me dentist appointment at 2pm"
-💼 "Remind me meeting with John at 9am"
-
-Try it now! 😊`);
   } else {
-    sendMessage(from, `👋 Welcome to your Personal Reminder Assistant!
-
-I'm here to help you remember important things with a motivational touch! 
-
-Try saying:
-"Remind me to call mom tomorrow at 6pm"
-
-I'll send you encouraging reminders 30 minutes early and right on time! 
-
-What would you like me to remind you about? 😊`);
+    res.sendStatus(400);
   }
-  
-  res.status(200).send();
 });
 
-// Check reminders every minute
-cron.schedule('* * * * *', () => {
-  const now = new Date();
-  console.log(`Checking reminders at ${now.toLocaleTimeString()}...`);
-  
-  reminders.forEach((reminder) => {
-    if (!reminder.completed) {
-      if (!reminder.earlySent && now >= reminder.earlyTime) {
-        const timeStr = reminder.scheduledTime.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
-        const earlyMessage = `⚠️ 30-minute heads up!
-📝 ${reminder.task}
-⏰ Scheduled for ${timeStr}
+// Webhook for receiving messages
+app.post('/webhook', async (req, res) => {
+  try {
+    const body = req.body;
+    console.log('Received webhook:', JSON.stringify(body, null, 2));
 
-Getting ready? I'll remind you again right on time! 😊`;
-        
-        sendMessage(reminder.from, earlyMessage);
-        reminder.earlySent = true;
-      }
-      
-      if (now >= reminder.scheduledTime) {
-        const finalMessage = `🔔 It's time!
-📝 ${reminder.task}
-
-${getMotivationalMessage(reminder.task)}`;
-        
-        sendMessage(reminder.from, finalMessage);
-        reminder.completed = true;
-      }
+    if (body.object === 'whatsapp_business_account') {
+      body.entry?.forEach(entry => {
+        entry.changes?.forEach(change => {
+          if (change.field === 'messages') {
+            const messages = change.value.messages;
+            const contacts = change.value.contacts;
+            
+            if (messages && messages.length > 0) {
+              messages.forEach(async (message) => {
+                if (message.type === 'text') {
+                  const contact = contacts?.find(c => c.wa_id === message.from);
+                  await handleIncomingMessage(message, contact);
+                }
+              });
+            }
+          }
+        });
+      });
     }
+
+    res.sendStatus(200);
+  } catch (error) {
+    console.error('Error processing webhook:', error);
+    res.sendStatus(500);
+  }
+});
+
+// Handle incoming messages
+async function handleIncomingMessage(message, contact) {
+  try {
+    const userId = message.from;
+    const userName = contact?.profile?.name || 'User';
+    const messageText = message.text.body.toLowerCase();
+
+    console.log(`Processing message from ${userName} (${userId}): ${messageText}`);
+
+    if (messageText.includes('remind me') || messageText.includes('reminder')) {
+      const reminderData = parseReminder(messageText);
+      
+      if (reminderData && reminderData.scheduledTime > new Date()) {
+        // Save reminder to database
+        const reminder = new Reminder({
+          userId: userId,
+          userName: userName,
+          message: reminderData.message,
+          scheduledTime: reminderData.scheduledTime
+        });
+        
+        await reminder.save();
+        
+        const context = reminderData.context;
+        const confirmationMessage = `✅ ${context.encouragement}\n\nReminder set for ${reminderData.scheduledTime.toLocaleString()}:\n"${reminderData.message}" ${context.emoji}`;
+        await sendWhatsAppMessage(userId, confirmationMessage);
+      } else {
+        await sendWhatsAppMessage(userId, '❌ Sorry, I couldn\'t understand the time. Please try again with a format like "Remind me to call John at 3 PM tomorrow"');
+      }
+    } else if (messageText.includes('list') || messageText.includes('my reminders')) {
+      const reminders = await Reminder.find({ 
+        userId: userId, 
+        isCompleted: false,
+        scheduledTime: { $gt: new Date() }
+      }).sort({ scheduledTime: 1 });
+      
+      if (reminders.length > 0) {
+        let response = '📋 Your upcoming reminders:\n\n';
+        reminders.forEach((reminder, index) => {
+          const context = detectContext(reminder.message);
+          response += `${index + 1}. ${reminder.message} ${context.emoji}\n   📅 ${reminder.scheduledTime.toLocaleString()}\n\n`;
+        });
+        await sendWhatsAppMessage(userId, response);
+      } else {
+        await sendWhatsAppMessage(userId, '📋 You have no upcoming reminders.\n\n💡 Try saying "Remind me to call mom at 6 PM" or "Remind me about my doctor appointment tomorrow at 2 PM"');
+      }
+    } else {
+      await sendWhatsAppMessage(userId, `👋 Hi ${userName}! I'm your caring reminder assistant! 💝\n\nI can help you remember important things with a personal touch:\n\n💕 "Remind me to call mom at 6 PM"\n🤝 "Remind me about my meeting tomorrow at 2 PM"\n🏥 "Remind me about my doctor appointment Friday at 10 AM"\n💪 "Remind me to go to the gym at 7 AM"\n🎉 "Remind me about Sarah's birthday party Saturday"\n\nTry "list my reminders" to see what's coming up! ✨`);
+    }
+  } catch (error) {
+    console.error('Error handling message:', error);
+    await sendWhatsAppMessage(message.from, '❌ Sorry, something went wrong. Please try again.');
+  }
+}
+
+// Cron job to check for due reminders
+cron.schedule('* * * * *', async () => {
+  try {
+    const now = new Date();
+    const dueReminders = await Reminder.find({
+      scheduledTime: { $lte: now },
+      isCompleted: false
+    });
+
+    for (const reminder of dueReminders) {
+      const context = detectContext(reminder.message);
+      await sendWhatsAppMessage(
+        reminder.userId,
+        `${context.reminder}\n\n"${reminder.message}"\n\nSent with care 💙`
+      );
+      
+      reminder.isCompleted = true;
+      await reminder.save();
+      
+      console.log(`Caring reminder sent to ${reminder.userName}: ${reminder.message}`);
+    }
+  } catch (error) {
+    console.error('Error checking reminders:', error);
+  }
+});
+
+// Health check endpoint
+app.get('/', (req, res) => {
+  res.json({ 
+    status: '💝 WhatsApp Caring Reminder Bot is running!',
+    message: 'Ready to help you remember what matters most',
+    timestamp: new Date().toISOString(),
+    environment: process.env.NODE_ENV || 'development',
+    features: [
+      '💕 Family call reminders',
+      '🤝 Meeting support',
+      '🏥 Health appointment care',
+      '💪 Fitness motivation',
+      '🎉 Celebration alerts',
+      '💊 Medication reminders'
+    ]
   });
 });
 
-// Health check
-app.get('/', (req, res) => {
-  const activeReminders = reminders.filter(r => !r.completed).length;
-  
-  res.send(`
-    <h1>🤖 WhatsApp Reminder Bot</h1>
-    <p>Status: <strong>Running</strong> ✅</p>
-    <p>Active Reminders: <strong>${activeReminders}</strong></p>
-    <p>Server Time: <strong>${new Date().toLocaleString()}</strong></p>
-    <hr>
-    <p>Ready to help you remember everything! 😊</p>
-  `);
+// Start server
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+  console.log('WhatsApp Reminder Bot is ready!');
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`🚀 WhatsApp Reminder Bot running on port ${PORT}`);
+// Graceful shutdown
+process.on('SIGINT', async () => {
+  console.log('Shutting down gracefully...');
+  await mongoose.connection.close();
+  process.exit(0);
+});
+
+process.on('SIGTERM', async () => {
+  console.log('Shutting down gracefully...');
+  await mongoose.connection.close();
+  process.exit(0);
 });
