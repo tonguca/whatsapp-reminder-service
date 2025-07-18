@@ -10,6 +10,13 @@ const PORT = process.env.PORT || 10000;
 
 // Middleware
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
+// Add request logging middleware
+app.use((req, res, next) => {
+  console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
+  next();
+});
 
 // Environment variables validation
 const requiredEnvVars = {
@@ -27,19 +34,47 @@ const missingVars = Object.entries(requiredEnvVars)
 if (missingVars.length > 0) {
   console.error('Missing required environment variables:', missingVars);
   console.error('Please set these variables in your Render dashboard');
-  process.exit(1);
+  // Don't exit in production, just log the error
+  if (process.env.NODE_ENV !== 'production') {
+    process.exit(1);
+  }
 }
 
-// MongoDB connection
-mongoose.connect(process.env.MONGODB_URI, {
-  useNewUrlParser: true,
-  useUnifiedTopology: true,
-})
-.then(() => console.log('Connected to MongoDB'))
-.catch(err => {
-  console.error('MongoDB connection error:', err);
-  process.exit(1);
-});
+// MongoDB connection with retry logic
+async function connectToMongoDB() {
+  const maxRetries = 5;
+  let retries = 0;
+  
+  while (retries < maxRetries) {
+    try {
+      await mongoose.connect(process.env.MONGODB_URI, {
+        useNewUrlParser: true,
+        useUnifiedTopology: true,
+        serverSelectionTimeoutMS: 10000, // 10 seconds
+        socketTimeoutMS: 45000, // 45 seconds
+      });
+      console.log('Connected to MongoDB');
+      return;
+    } catch (err) {
+      retries++;
+      console.error(`MongoDB connection attempt ${retries} failed:`, err.message);
+      
+      if (retries >= maxRetries) {
+        console.error('Max retries reached. Could not connect to MongoDB.');
+        if (process.env.NODE_ENV !== 'production') {
+          process.exit(1);
+        }
+        return;
+      }
+      
+      // Wait before retrying
+      await new Promise(resolve => setTimeout(resolve, 5000));
+    }
+  }
+}
+
+// Initialize MongoDB connection
+connectToMongoDB();
 
 // Reminder Schema
 const reminderSchema = new mongoose.Schema({
@@ -53,9 +88,11 @@ const reminderSchema = new mongoose.Schema({
 
 const Reminder = mongoose.model('Reminder', reminderSchema);
 
-// WhatsApp API functions
+// WhatsApp API functions with better error handling
 async function sendWhatsAppMessage(to, message) {
   try {
+    console.log(`Sending message to ${to}: ${message.substring(0, 50)}...`);
+    
     const response = await axios.post(
       `https://graph.facebook.com/v17.0/${process.env.PHONE_NUMBER_ID}/messages`,
       {
@@ -68,13 +105,19 @@ async function sendWhatsAppMessage(to, message) {
         headers: {
           'Authorization': `Bearer ${process.env.WHATSAPP_TOKEN}`,
           'Content-Type': 'application/json'
-        }
+        },
+        timeout: 10000 // 10 seconds timeout
       }
     );
-    console.log('Message sent successfully:', response.data);
+    console.log('Message sent successfully:', response.data?.messages?.[0]?.id || 'Unknown ID');
     return response.data;
   } catch (error) {
-    console.error('Error sending WhatsApp message:', error.response?.data || error.message);
+    console.error('Error sending WhatsApp message:', {
+      status: error.response?.status,
+      statusText: error.response?.statusText,
+      data: error.response?.data,
+      message: error.message
+    });
     throw error;
   }
 }
@@ -149,24 +192,32 @@ function detectContext(messageText) {
 
 // Parse reminder from message
 function parseReminder(messageText) {
-  const parsed = chrono.parseDate(messageText);
-  if (!parsed) return null;
-  
-  // Extract the reminder message (everything before the time phrase)
-  const timeMatch = messageText.match(/\s+(at|on|in|tomorrow|today|next)\s+/i);
-  let reminderText = messageText;
-  
-  if (timeMatch) {
-    reminderText = messageText.substring(0, timeMatch.index).trim();
+  try {
+    const parsed = chrono.parseDate(messageText);
+    if (!parsed) return null;
+    
+    // Extract the reminder message (everything before the time phrase)
+    const timeMatch = messageText.match(/\s+(at|on|in|tomorrow|today|next)\s+/i);
+    let reminderText = messageText;
+    
+    if (timeMatch) {
+      reminderText = messageText.substring(0, timeMatch.index).trim();
+    }
+    
+    // Remove "remind me to" from the beginning
+    reminderText = reminderText.replace(/^remind me to\s+/i, '');
+    
+    const context = detectContext(messageText);
+    
+    return {
+      message: reminderText || 'Reminder',
+      scheduledTime: parsed,
+      context: context
+    };
+  } catch (error) {
+    console.error('Error parsing reminder:', error);
+    return null;
   }
-  
-  const context = detectContext(messageText);
-  
-  return {
-    message: reminderText || 'Reminder',
-    scheduledTime: parsed,
-    context: context
-  };
 }
 
 // Webhook verification
@@ -175,15 +226,18 @@ app.get('/webhook', (req, res) => {
   const token = req.query['hub.verify_token'];
   const challenge = req.query['hub.challenge'];
 
+  console.log('Webhook verification attempt:', { mode, token: token ? 'provided' : 'missing' });
+
   if (mode && token) {
     if (mode === 'subscribe' && token === process.env.VERIFY_TOKEN) {
       console.log('Webhook verified successfully');
       res.status(200).send(challenge);
     } else {
-      console.error('Webhook verification failed');
+      console.error('Webhook verification failed - token mismatch');
       res.sendStatus(403);
     }
   } else {
+    console.error('Webhook verification failed - missing parameters');
     res.sendStatus(400);
   }
 });
@@ -195,6 +249,8 @@ app.post('/webhook', async (req, res) => {
     console.log('Received webhook:', JSON.stringify(body, null, 2));
 
     if (body.object === 'whatsapp_business_account') {
+      const promises = [];
+      
       body.entry?.forEach(entry => {
         entry.changes?.forEach(change => {
           if (change.field === 'messages') {
@@ -202,16 +258,19 @@ app.post('/webhook', async (req, res) => {
             const contacts = change.value.contacts;
             
             if (messages && messages.length > 0) {
-              messages.forEach(async (message) => {
+              messages.forEach((message) => {
                 if (message.type === 'text') {
                   const contact = contacts?.find(c => c.wa_id === message.from);
-                  await handleIncomingMessage(message, contact);
+                  promises.push(handleIncomingMessage(message, contact));
                 }
               });
             }
           }
         });
       });
+      
+      // Wait for all message processing to complete
+      await Promise.all(promises);
     }
 
     res.sendStatus(200);
@@ -272,7 +331,11 @@ async function handleIncomingMessage(message, contact) {
     }
   } catch (error) {
     console.error('Error handling message:', error);
-    await sendWhatsAppMessage(message.from, '❌ Sorry, something went wrong. Please try again.');
+    try {
+      await sendWhatsAppMessage(message.from, '❌ Sorry, something went wrong. Please try again.');
+    } catch (sendError) {
+      console.error('Error sending error message:', sendError);
+    }
   }
 }
 
@@ -285,17 +348,23 @@ cron.schedule('* * * * *', async () => {
       isCompleted: false
     });
 
+    console.log(`Checking reminders at ${now.toISOString()}: ${dueReminders.length} due reminders found`);
+
     for (const reminder of dueReminders) {
-      const context = detectContext(reminder.message);
-      await sendWhatsAppMessage(
-        reminder.userId,
-        `${context.reminder}\n\n"${reminder.message}"\n\nSent with care 💙`
-      );
-      
-      reminder.isCompleted = true;
-      await reminder.save();
-      
-      console.log(`Caring reminder sent to ${reminder.userName}: ${reminder.message}`);
+      try {
+        const context = detectContext(reminder.message);
+        await sendWhatsAppMessage(
+          reminder.userId,
+          `${context.reminder}\n\n"${reminder.message}"\n\nSent with care 💙`
+        );
+        
+        reminder.isCompleted = true;
+        await reminder.save();
+        
+        console.log(`Caring reminder sent to ${reminder.userName}: ${reminder.message}`);
+      } catch (error) {
+        console.error(`Error sending reminder to ${reminder.userName}:`, error);
+      }
     }
   } catch (error) {
     console.error('Error checking reminders:', error);
@@ -309,6 +378,8 @@ app.get('/', (req, res) => {
     message: 'Ready to help you remember what matters most',
     timestamp: new Date().toISOString(),
     environment: process.env.NODE_ENV || 'development',
+    uptime: process.uptime(),
+    mongodb_status: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
     features: [
       '💕 Family call reminders',
       '🤝 Meeting support',
@@ -320,8 +391,14 @@ app.get('/', (req, res) => {
   });
 });
 
+// Error handling middleware
+app.use((error, req, res, next) => {
+  console.error('Unhandled error:', error);
+  res.status(500).json({ error: 'Internal server error' });
+});
+
 // Start server
-app.listen(PORT, () => {
+app.listen(PORT, '0.0.0.0', () => {
   console.log(`Server running on port ${PORT}`);
   console.log('WhatsApp Reminder Bot is ready!');
 });
@@ -329,12 +406,33 @@ app.listen(PORT, () => {
 // Graceful shutdown
 process.on('SIGINT', async () => {
   console.log('Shutting down gracefully...');
-  await mongoose.connection.close();
+  try {
+    await mongoose.connection.close();
+    console.log('MongoDB connection closed');
+  } catch (error) {
+    console.error('Error closing MongoDB connection:', error);
+  }
   process.exit(0);
 });
 
 process.on('SIGTERM', async () => {
   console.log('Shutting down gracefully...');
-  await mongoose.connection.close();
+  try {
+    await mongoose.connection.close();
+    console.log('MongoDB connection closed');
+  } catch (error) {
+    console.error('Error closing MongoDB connection:', error);
+  }
   process.exit(0);
+});
+
+// Handle uncaught exceptions
+process.on('uncaughtException', (error) => {
+  console.error('Uncaught exception:', error);
+  process.exit(1);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled rejection at:', promise, 'reason:', reason);
+  process.exit(1);
 });
