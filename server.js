@@ -190,32 +190,42 @@ async function askChatGPT(prompt, systemMessage) {
   }
 }
 
-// Smart reminder analyzer
+// Smart reminder analyzer with typo correction
 async function analyzeReminder(messageText, userName) {
-  const systemMessage = `You are Jarvis, a direct and efficient reminder assistant. Analyze messages for reminder tasks.
+  const systemMessage = `You are Jarvis, a direct and efficient reminder assistant. Analyze messages for reminder tasks and fix common typos/abbreviations.
 
 User message: "${messageText}"
+
+Fix common typos and understand abbreviations:
+- "gum" → "gym"
+- "4.30" → "4:30 PM" (assume PM for times like 4.30, 5.30, etc.)
+- "630" → "6:30 AM" (assume AM for times like 630, 730, 830)
+- "doc" → "doctor"
+- "meds" → "medicine"
+- "mom/dad" → keep as is
+- partial words → best guess
 
 Respond with JSON only:
 {
   "isReminder": true/false,
-  "task": "clean task description",
+  "task": "corrected task description",
+  "originalTask": "original task from user",
   "timeFound": true/false,
-  "timeExpression": "time if found",
+  "timeExpression": "corrected time if found",
   "motivation": "short motivational phrase (max 4 words)",
   "needsTime": true/false,
   "isRecurring": true/false,
-  "recurrencePattern": "daily/weekly/monthly" (if recurring)
+  "recurrencePattern": "daily/weekly/monthly" (if recurring),
+  "typosCorrected": true/false,
+  "clarificationNeeded": true/false
 }
 
 Examples:
-- "gym at 7pm" → {"isReminder": true, "task": "gym", "timeFound": true, "timeExpression": "7pm", "motivation": "Stay strong! 💪", "needsTime": false, "isRecurring": false}
-- "call mom" → {"isReminder": true, "task": "call mom", "timeFound": false, "motivation": "Family matters! 💕", "needsTime": true, "isRecurring": false}
-- "vitamin morning" → {"isReminder": true, "task": "take vitamin", "timeFound": true, "timeExpression": "morning", "motivation": "Health first! 🌟", "needsTime": false, "isRecurring": false}
-- "gym every day at 7am" → {"isReminder": true, "task": "gym", "timeFound": true, "timeExpression": "7am", "motivation": "Stay strong! 💪", "needsTime": false, "isRecurring": true, "recurrencePattern": "daily"}
-- "water plants weekly" → {"isReminder": true, "task": "water plants", "timeFound": false, "motivation": "Green life! 🌱", "needsTime": true, "isRecurring": true, "recurrencePattern": "weekly"}
+- "gum at 430" → {"isReminder": true, "task": "gym", "originalTask": "gum", "timeFound": true, "timeExpression": "4:30 PM", "motivation": "Stay strong! 💪", "needsTime": false, "typosCorrected": true}
+- "call mom 6" → {"isReminder": true, "task": "call mom", "timeFound": true, "timeExpression": "6:00 PM", "motivation": "Family matters! 💕", "needsTime": false, "typosCorrected": true}
+- "doc appointment" → {"isReminder": true, "task": "doctor appointment", "originalTask": "doc appointment", "timeFound": false, "motivation": "Health first! 🏥", "needsTime": true, "typosCorrected": true}
 
-Be direct and precise.`;
+If unsure about typos, set clarificationNeeded: true.`;
 
   try {
     const result = await askChatGPT(messageText, systemMessage);
@@ -636,6 +646,12 @@ async function handleIncomingMessage(message, contact) {
       }
       
       if (analysis.timeFound && !analysis.needsTime) {
+        // Show typo corrections if any
+        let confirmationMsg = `📝 Confirm reminder:\n\n"${reminderData.message}"`;
+        if (analysis.typosCorrected && analysis.originalTask) {
+          confirmationMsg = `📝 Confirm reminder (I corrected "${analysis.originalTask}" → "${analysis.task}"):\n\n"${reminderData.message}"`;
+        }
+        
         // Complete reminder with time - ask for confirmation first
         const reminderData = parseReminderWithTimezone(messageText, analysis.task, user.timezoneOffset);
         
@@ -643,7 +659,7 @@ async function handleIncomingMessage(message, contact) {
           // Show confirmation before saving
           const dayName = new Date(reminderData.scheduledTime.getTime() + (user.timezoneOffset * 60 * 60 * 1000)).toLocaleDateString('en-US', { weekday: 'long' });
           
-          await sendWhatsAppMessage(userId, `📝 Confirm reminder:\n\n"${reminderData.message}"\n📅 ${dayName}, ${reminderData.userLocalTime}\n\nReply "yes" to confirm or "no" to cancel.`);
+          await sendWhatsAppMessage(userId, `${confirmationMsg}\n📅 ${dayName}, ${reminderData.userLocalTime}\n\nReply "yes" to confirm or "no" to cancel.`);
           
           // Store pending reminder in user object (temporary)
           user.pendingReminder = {
@@ -655,6 +671,9 @@ async function handleIncomingMessage(message, contact) {
         } else {
           await sendWhatsAppMessage(userId, `⚠️ That time has passed, ${user.preferredName}.\n\nTry: "${analysis.task} tomorrow at 9am"`);
         }
+      } else if (analysis.clarificationNeeded) {
+        // AI needs clarification
+        await sendWhatsAppMessage(userId, `🤔 I think you mean "${analysis.task}" but I'm not sure.\n\nDid you mean:\n• "${analysis.task} at [time]"?\n\nPlease clarify with specific day and time.`);
       } else {
         // Needs time confirmation
         await sendWhatsAppMessage(userId, `📝 Task: "${analysis.task}"\n\n⚠️ Please specify exact day and time:\n\n• "at 7pm today"\n• "at 3pm tomorrow"\n• "Monday at 2pm"\n\nBe specific to avoid confusion.`);
