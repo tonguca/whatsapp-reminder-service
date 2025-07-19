@@ -18,11 +18,12 @@ app.use((req, res, next) => {
   next();
 });
 
-// Environment variables validation
+// Environment variables validation - UPDATED FOR TWILIO
 const requiredEnvVars = {
   VERIFY_TOKEN: process.env.VERIFY_TOKEN,
-  WHATSAPP_TOKEN: process.env.WHATSAPP_TOKEN,
-  PHONE_NUMBER_ID: process.env.PHONE_NUMBER_ID,
+  TWILIO_ACCOUNT_SID: process.env.TWILIO_ACCOUNT_SID,
+  TWILIO_AUTH_TOKEN: process.env.TWILIO_AUTH_TOKEN,
+  TWILIO_PHONE_NUMBER: process.env.TWILIO_PHONE_NUMBER,
   MONGODB_URI: process.env.MONGODB_URI
 };
 
@@ -88,28 +89,30 @@ const reminderSchema = new mongoose.Schema({
 
 const Reminder = mongoose.model('Reminder', reminderSchema);
 
-// WhatsApp API functions with better error handling
+// UPDATED: Twilio WhatsApp API function
 async function sendWhatsAppMessage(to, message) {
   try {
     console.log(`Sending message to ${to}: ${message.substring(0, 50)}...`);
     
+    // Create Basic Auth token
+    const authToken = Buffer.from(`${process.env.TWILIO_ACCOUNT_SID}:${process.env.TWILIO_AUTH_TOKEN}`).toString('base64');
+    
     const response = await axios.post(
-      `https://graph.facebook.com/v17.0/${process.env.PHONE_NUMBER_ID}/messages`,
-      {
-        messaging_product: 'whatsapp',
-        to: to,
-        text: { body: message },
-        type: 'text'
-      },
+      `https://api.twilio.com/2010-04-01/Accounts/${process.env.TWILIO_ACCOUNT_SID}/Messages.json`,
+      new URLSearchParams({
+        From: `whatsapp:${process.env.TWILIO_PHONE_NUMBER}`,
+        To: `whatsapp:${to}`,
+        Body: message
+      }),
       {
         headers: {
-          'Authorization': `Bearer ${process.env.WHATSAPP_TOKEN}`,
-          'Content-Type': 'application/json'
+          'Authorization': `Basic ${authToken}`,
+          'Content-Type': 'application/x-www-form-urlencoded'
         },
         timeout: 10000 // 10 seconds timeout
       }
     );
-    console.log('Message sent successfully:', response.data?.messages?.[0]?.id || 'Unknown ID');
+    console.log('Message sent successfully:', response.data?.sid || 'Unknown ID');
     return response.data;
   } catch (error) {
     console.error('Error sending WhatsApp message:', {
@@ -122,7 +125,7 @@ async function sendWhatsAppMessage(to, message) {
   }
 }
 
-// Context detection for human touches
+// Context detection for human touches (unchanged)
 function detectContext(messageText) {
   const text = messageText.toLowerCase();
   
@@ -190,7 +193,7 @@ function detectContext(messageText) {
   };
 }
 
-// Parse reminder from message
+// Parse reminder from message (unchanged)
 function parseReminder(messageText) {
   try {
     const parsed = chrono.parseDate(messageText);
@@ -220,7 +223,7 @@ function parseReminder(messageText) {
   }
 }
 
-// Webhook verification
+// Webhook verification (unchanged)
 app.get('/webhook', (req, res) => {
   const mode = req.query['hub.mode'];
   const token = req.query['hub.verify_token'];
@@ -242,45 +245,41 @@ app.get('/webhook', (req, res) => {
   }
 });
 
-// Webhook for receiving messages
+// UPDATED: Webhook for receiving Twilio messages
 app.post('/webhook', async (req, res) => {
   try {
     const body = req.body;
-    console.log('Received webhook:', JSON.stringify(body, null, 2));
+    console.log('Received Twilio webhook:', JSON.stringify(body, null, 2));
 
-    if (body.object === 'whatsapp_business_account') {
-      const promises = [];
+    // Handle Twilio webhook format
+    if (body.From && body.Body) {
+      // Extract phone number from whatsapp:+1234567890 format
+      const phoneNumber = body.From.replace('whatsapp:', '');
       
-      body.entry?.forEach(entry => {
-        entry.changes?.forEach(change => {
-          if (change.field === 'messages') {
-            const messages = change.value.messages;
-            const contacts = change.value.contacts;
-            
-            if (messages && messages.length > 0) {
-              messages.forEach((message) => {
-                if (message.type === 'text') {
-                  const contact = contacts?.find(c => c.wa_id === message.from);
-                  promises.push(handleIncomingMessage(message, contact));
-                }
-              });
-            }
-          }
-        });
-      });
+      // Create message object similar to Meta format for compatibility
+      const message = {
+        from: phoneNumber,
+        text: { body: body.Body },
+        type: 'text'
+      };
       
-      // Wait for all message processing to complete
-      await Promise.all(promises);
+      // Create contact object
+      const contact = {
+        wa_id: phoneNumber,
+        profile: { name: body.ProfileName || 'User' }
+      };
+      
+      await handleIncomingMessage(message, contact);
     }
 
     res.sendStatus(200);
   } catch (error) {
-    console.error('Error processing webhook:', error);
+    console.error('Error processing Twilio webhook:', error);
     res.sendStatus(500);
   }
 });
 
-// Handle incoming messages
+// Handle incoming messages (unchanged)
 async function handleIncomingMessage(message, contact) {
   try {
     const userId = message.from;
@@ -339,7 +338,7 @@ async function handleIncomingMessage(message, contact) {
   }
 }
 
-// Cron job to check for due reminders
+// Cron job to check for due reminders (unchanged)
 cron.schedule('* * * * *', async () => {
   try {
     const now = new Date();
@@ -374,12 +373,13 @@ cron.schedule('* * * * *', async () => {
 // Health check endpoint
 app.get('/', (req, res) => {
   res.json({ 
-    status: '💝 WhatsApp Caring Reminder Bot is running!',
+    status: '💝 WhatsApp Caring Reminder Bot is running with Twilio!',
     message: 'Ready to help you remember what matters most',
     timestamp: new Date().toISOString(),
     environment: process.env.NODE_ENV || 'development',
     uptime: process.uptime(),
     mongodb_status: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
+    twilio_status: process.env.TWILIO_ACCOUNT_SID ? 'configured' : 'not configured',
     features: [
       '💕 Family call reminders',
       '🤝 Meeting support',
@@ -400,7 +400,7 @@ app.use((error, req, res, next) => {
 // Start server
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Server running on port ${PORT}`);
-  console.log('WhatsApp Reminder Bot is ready!');
+  console.log('WhatsApp Reminder Bot with Twilio is ready!');
 });
 
 // Graceful shutdown
