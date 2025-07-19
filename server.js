@@ -69,7 +69,7 @@ async function connectToMongoDB() {
 
 connectToMongoDB();
 
-// User Schema
+// User Schema with pending reminder
 const userSchema = new mongoose.Schema({
   userId: { type: String, required: true, unique: true },
   userName: { type: String, required: true },
@@ -79,12 +79,13 @@ const userSchema = new mongoose.Schema({
   messageCount: { type: Number, default: 0 },
   lastResetDate: { type: Date, default: Date.now },
   isSetup: { type: Boolean, default: false },
+  pendingReminder: { type: Object, default: null }, // For confirmation flow
   createdAt: { type: Date, default: Date.now }
 });
 
 const User = mongoose.model('User', userSchema);
 
-// Reminder Schema
+// Reminder Schema with recurring support
 const reminderSchema = new mongoose.Schema({
   userId: { type: String, required: true },
   userName: { type: String, required: true },
@@ -92,6 +93,9 @@ const reminderSchema = new mongoose.Schema({
   scheduledTime: { type: Date, required: true },
   userLocalTime: { type: String, required: true },
   isCompleted: { type: Boolean, default: false },
+  isRecurring: { type: Boolean, default: false },
+  recurrencePattern: { type: String, default: null }, // daily, weekly, monthly
+  nextOccurrence: { type: Date, default: null },
   createdAt: { type: Date, default: Date.now }
 });
 
@@ -173,13 +177,17 @@ Respond with JSON only:
   "timeFound": true/false,
   "timeExpression": "time if found",
   "motivation": "short motivational phrase (max 4 words)",
-  "needsTime": true/false
+  "needsTime": true/false,
+  "isRecurring": true/false,
+  "recurrencePattern": "daily/weekly/monthly" (if recurring)
 }
 
 Examples:
 - "gym at 7pm" → {"isReminder": true, "task": "gym", "timeFound": true, "timeExpression": "7pm", "motivation": "Stay strong! 💪", "needsTime": false}
 - "call mom" → {"isReminder": true, "task": "call mom", "timeFound": false, "motivation": "Family matters! 💕", "needsTime": true}
-- "vitamin morning" → {"isReminder": true, "task": "take vitamin", "timeFound": true, "timeExpression": "morning", "motivation": "Health first! 🌟", "needsTime": false}
+- "vitamin morning" → {"isReminder": true, "task": "take vitamin", "timeFound": true, "timeExpression": "morning", "motivation": "Health first! 🌟", "needsTime": false, "isRecurring": false}
+- "gym every day at 7am" → {"isReminder": true, "task": "gym", "timeFound": true, "timeExpression": "7am", "motivation": "Stay strong! 💪", "needsTime": false, "isRecurring": true, "recurrencePattern": "daily"}
+- "water plants weekly" → {"isReminder": true, "task": "water plants", "timeFound": false, "motivation": "Green life! 🌱", "needsTime": true, "isRecurring": true, "recurrencePattern": "weekly"}
 
 Be direct and precise.`;
 
@@ -274,12 +282,30 @@ async function sendWhatsAppMessage(to, message) {
   }
 }
 
-// Enhanced reminder parsing
+// Enhanced reminder parsing with same-day assumption
 function parseReminderWithTimezone(messageText, task, timezoneOffset = 0) {
   try {
     let parsed = chrono.parseDate(messageText);
     
-    // Smart defaults
+    // Smart defaults for time-only messages
+    if (!parsed) {
+      // Check for time patterns like "at 8am", "at 3pm"
+      const timeMatch = messageText.match(/at\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm))/i);
+      if (timeMatch) {
+        const timeStr = timeMatch[1];
+        const today = new Date();
+        const timeToday = chrono.parseDate(`today at ${timeStr}`);
+        
+        if (timeToday && timeToday > new Date()) {
+          parsed = timeToday; // Same day
+        } else {
+          // Time has passed today, set for tomorrow
+          parsed = chrono.parseDate(`tomorrow at ${timeStr}`);
+        }
+      }
+    }
+    
+    // Handle common phrases
     if (!parsed) {
       if (messageText.toLowerCase().includes('morning')) {
         const morning = new Date();
@@ -383,7 +409,66 @@ async function handleIncomingMessage(message, contact) {
       await user.save();
     }
 
-    // Check usage limits
+    // Generate contextual motivational message for reminders
+async function generateContextualMessage(task, userName) {
+  const systemMessage = `You are an empathetic life coach creating a unique, personalized reminder message.
+
+Task: "${task}"
+User: ${userName}
+
+Analyze the task context and create a completely original 2-part motivational message:
+1. Present moment encouragement (why this matters now)
+2. Future positive outcome (how they'll feel after)
+
+Respond with JSON only:
+{
+  "encouragement": "unique motivating message for doing this task now",
+  "reward": "unique positive message about the outcome/feeling after"
+}
+
+Be creative, vary your language, consider:
+- Task type (health, work, personal, fitness, family, etc.)
+- Time of day implications
+- Emotional benefits
+- Personal growth aspects
+- Practical benefits
+- Social connections
+
+Make each message feel fresh, personal, and specifically crafted for this exact situation. Never repeat generic phrases.`;
+
+  try {
+    const result = await askChatGPT(task, systemMessage);
+    return result || {
+      encouragement: "Time to take action - you've got this!",
+      reward: "You'll feel accomplished and proud after completing this!"
+    };
+  } catch (error) {
+    console.error('Error generating contextual message:', error);
+    return {
+      encouragement: "Time to take action - you've got this!",
+      reward: "You'll feel accomplished and proud after completing this!"
+    };
+  }
+}
+function calculateNextOccurrence(currentTime, pattern) {
+  const next = new Date(currentTime);
+  
+  switch (pattern) {
+    case 'daily':
+      next.setDate(next.getDate() + 1);
+      break;
+    case 'weekly':
+      next.setDate(next.getDate() + 7);
+      break;
+    case 'monthly':
+      next.setMonth(next.getMonth() + 1);
+      break;
+    default:
+      return null;
+  }
+  
+  return next;
+}
     const usageCheck = await checkUsageLimits(user);
     if (!usageCheck.withinLimit) {
       await sendWhatsAppMessage(userId, `🚫 Daily limit reached (${USAGE_LIMITS.FREE_TIER_MESSAGES} messages).\n\n⭐ Upgrade for unlimited reminders!`);
@@ -429,6 +514,39 @@ async function handleIncomingMessage(message, contact) {
 
     // Handle commands for setup users
     
+    // Handle pending reminder confirmations
+    if (user.pendingReminder && (messageText.toLowerCase() === 'yes' || messageText.toLowerCase() === 'y')) {
+      const pendingData = user.pendingReminder;
+      
+      const reminder = new Reminder({
+        userId: userId,
+        userName: userName,
+        message: pendingData.message,
+        scheduledTime: pendingData.scheduledTime,
+        userLocalTime: pendingData.userLocalTime,
+        isRecurring: pendingData.isRecurring || false,
+        recurrencePattern: pendingData.recurrencePattern || null,
+        nextOccurrence: pendingData.isRecurring ? calculateNextOccurrence(pendingData.scheduledTime, pendingData.recurrencePattern) : null
+      });
+      
+      await reminder.save();
+      
+      user.pendingReminder = null;
+      await user.save();
+      
+      const recurringText = pendingData.isRecurring ? ` (${pendingData.recurrencePattern})` : '';
+      await sendWhatsAppMessage(userId, `✅ ${pendingData.isRecurring ? 'Recurring reminder' : 'Reminder'} confirmed!\n\n"${pendingData.message}"${recurringText}\n📅 ${pendingData.userLocalTime}\n\nAll set, ${user.preferredName}! 🎯`);
+      return;
+    }
+    
+    if (user.pendingReminder && (messageText.toLowerCase() === 'no' || messageText.toLowerCase() === 'n')) {
+      user.pendingReminder = null;
+      await user.save();
+      
+      await sendWhatsAppMessage(userId, `❌ Reminder cancelled, ${user.preferredName}.\n\nTry again when ready! 🎯`);
+      return;
+    }
+    
     // Name change check
     const nameChange = isNameChange(messageText);
     if (nameChange) {
@@ -452,7 +570,8 @@ async function handleIncomingMessage(message, contact) {
       if (reminders.length > 0) {
         let response = `📋 Your reminders, ${user.preferredName}:\n\n`;
         reminders.forEach((reminder, index) => {
-          response += `${index + 1}. ${reminder.message}\n   📅 ${reminder.userLocalTime}\n\n`;
+          const recurringText = reminder.isRecurring ? ` (${reminder.recurrencePattern})` : '';
+          response += `${index + 1}. ${reminder.message}${recurringText}\n   📅 ${reminder.userLocalTime}\n\n`;
         });
         await sendWhatsAppMessage(userId, response);
       } else {
@@ -465,22 +584,50 @@ async function handleIncomingMessage(message, contact) {
     const analysis = await analyzeReminder(messageText, user.preferredName);
     
     if (analysis && analysis.isReminder) {
+      // Handle recurring reminders
+      if (analysis.isRecurring) {
+        if (analysis.timeFound) {
+          const reminderData = parseReminderWithTimezone(messageText, analysis.task, user.timezoneOffset);
+          
+          if (reminderData && reminderData.scheduledTime > new Date()) {
+            const dayName = new Date(reminderData.scheduledTime.getTime() + (user.timezoneOffset * 60 * 60 * 1000)).toLocaleDateString('en-US', { weekday: 'long' });
+            
+            await sendWhatsAppMessage(userId, `🔄 Recurring reminder:\n\n"${analysis.task}" - ${analysis.recurrencePattern}\n📅 Starting: ${dayName}, ${reminderData.userLocalTime}\n\nReply "yes" to confirm recurring reminder.`);
+            
+            user.pendingReminder = {
+              message: analysis.task,
+              scheduledTime: reminderData.scheduledTime,
+              userLocalTime: reminderData.userLocalTime,
+              isRecurring: true,
+              recurrencePattern: analysis.recurrencePattern
+            };
+            await user.save();
+          } else {
+            await sendWhatsAppMessage(userId, `⚠️ That time has passed. Try: "${analysis.task} ${analysis.recurrencePattern} starting tomorrow at 9am"`);
+          }
+        } else {
+          await sendWhatsAppMessage(userId, `🔄 Recurring task: "${analysis.task}" - ${analysis.recurrencePattern}\n\nWhat time should this repeat?\n\n• "at 8am daily"\n• "Mondays at 2pm"\n• "every Sunday at 10am"`);
+        }
+        return;
+      }
+      
       if (analysis.timeFound && !analysis.needsTime) {
-        // Complete reminder with time
+        // Complete reminder with time - ask for confirmation first
         const reminderData = parseReminderWithTimezone(messageText, analysis.task, user.timezoneOffset);
         
         if (reminderData && reminderData.scheduledTime > new Date()) {
-          const reminder = new Reminder({
-            userId: userId,
-            userName: userName,
+          // Show confirmation before saving
+          const dayName = new Date(reminderData.scheduledTime.getTime() + (user.timezoneOffset * 60 * 60 * 1000)).toLocaleDateString('en-US', { weekday: 'long' });
+          
+          await sendWhatsAppMessage(userId, `📝 Confirm reminder:\n\n"${reminderData.message}"\n📅 ${dayName}, ${reminderData.userLocalTime}\n\nReply "yes" to confirm or "no" to cancel.`);
+          
+          // Store pending reminder in user object (temporary)
+          user.pendingReminder = {
             message: reminderData.message,
             scheduledTime: reminderData.scheduledTime,
             userLocalTime: reminderData.userLocalTime
-          });
-          
-          await reminder.save();
-          
-          await sendWhatsAppMessage(userId, `✅ ${analysis.motivation}\n\nReminder: "${reminderData.message}"\n📅 ${reminderData.userLocalTime}\n\nConfirmed, ${user.preferredName}! 🎯`);
+          };
+          await user.save();
         } else {
           await sendWhatsAppMessage(userId, `⚠️ That time has passed, ${user.preferredName}.\n\nTry: "${analysis.task} tomorrow at 9am"`);
         }
@@ -507,7 +654,7 @@ async function handleIncomingMessage(message, contact) {
   }
 }
 
-// Cron job for reminders
+// Cron job for reminders with recurring support
 cron.schedule('* * * * *', async () => {
   try {
     const now = new Date();
@@ -523,13 +670,27 @@ cron.schedule('* * * * *', async () => {
         const user = await User.findOne({ userId: reminder.userId });
         const preferredName = user?.preferredName || 'there';
         
+        // Generate contextual motivational message
+        const contextualMsg = await generateContextualMessage(reminder.message, preferredName);
+        
+        const recurringIcon = reminder.isRecurring ? '🔄' : '🔔';
         await sendWhatsAppMessage(
           reminder.userId,
-          `🔔 REMINDER\n\n"${reminder.message}"\n\nTime to act, ${preferredName}! 💪`
+          `${recurringIcon} REMINDER: "${reminder.message}"\n\n💪 ${contextualMsg.encouragement}\n\n🌟 ${contextualMsg.reward}\n\nGo for it, ${preferredName}!`
         );
         
-        reminder.isCompleted = true;
-        await reminder.save();
+        // Handle recurring reminders
+        if (reminder.isRecurring && reminder.nextOccurrence) {
+          reminder.scheduledTime = reminder.nextOccurrence;
+          reminder.nextOccurrence = calculateNextOccurrence(reminder.nextOccurrence, reminder.recurrencePattern);
+          reminder.userLocalTime = new Date(reminder.scheduledTime.getTime() + (user.timezoneOffset * 60 * 60 * 1000)).toLocaleString();
+          await reminder.save();
+          
+          console.log(`🔄 Recurring reminder rescheduled: ${reminder.message} for ${reminder.userLocalTime}`);
+        } else {
+          reminder.isCompleted = true;
+          await reminder.save();
+        }
         
         console.log(`✅ Reminded ${preferredName}: ${reminder.message}`);
       } catch (error) {
@@ -556,7 +717,8 @@ app.get('/', (req, res) => {
       '🤖 AI-powered conversation understanding',
       '📍 Location-based timezone setup',
       '✅ Smart reminder confirmation',
-      '💪 Contextual motivational messages',
+      '🔄 Recurring reminders (daily/weekly/monthly)',
+      '💪 Contextual AI motivational messages',
       '📋 Reminder management',
       '🎯 Direct, efficient responses',
       '🚫 Usage limits with upgrade prompts'
