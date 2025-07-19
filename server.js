@@ -438,10 +438,14 @@ app.get('/webhook', (req, res) => {
   }
 });
 
-// Webhook for receiving messages
+// Webhook for receiving messages with better error handling
 app.post('/webhook', async (req, res) => {
+  // Send immediate response to Twilio to prevent timeouts
+  res.sendStatus(200);
+  
   try {
     const body = req.body;
+    console.log('📨 Webhook received:', body.From, body.Body);
 
     if (body.From && body.Body) {
       const phoneNumber = body.From.replace('whatsapp:', '');
@@ -457,13 +461,15 @@ app.post('/webhook', async (req, res) => {
         profile: { name: body.ProfileName || 'User' }
       };
       
-      await handleIncomingMessage(message, contact);
+      // Handle message asynchronously to prevent webhook timeouts
+      setImmediate(() => {
+        handleIncomingMessage(message, contact).catch(error => {
+          console.error('❌ Async message handling error:', error);
+        });
+      });
     }
-
-    res.sendStatus(200);
   } catch (error) {
-    console.error('Error processing webhook:', error);
-    res.sendStatus(500);
+    console.error('❌ Webhook processing error:', error);
   }
 });
 
