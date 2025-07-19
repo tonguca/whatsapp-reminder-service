@@ -86,7 +86,7 @@ const userSchema = new mongoose.Schema({
 
 const User = mongoose.model('User', userSchema);
 
-// FIXED Reminder Schema - relaxed validation, proper one-time logic
+// FIXED Reminder Schema
 const reminderSchema = new mongoose.Schema({
   userId: { type: String, required: true },
   userName: { type: String, default: 'User' },
@@ -154,7 +154,7 @@ function calculateNextOccurrence(currentTime, pattern) {
   return next;
 }
 
-// Enhanced ChatGPT function
+// Enhanced ChatGPT function with error handling
 async function askChatGPT(prompt, systemMessage) {
   try {
     console.log('🤖 ChatGPT analyzing...');
@@ -193,64 +193,55 @@ async function askChatGPT(prompt, systemMessage) {
   }
 }
 
-// ENHANCED message analyzer - detects time-only and action-only messages
+// SIMPLIFIED and ROBUST reminder analyzer
 async function analyzeReminder(messageText, userName) {
-  const systemMessage = `You are Jarvis, analyzing reminder messages. 
+  const systemMessage = `You are Jarvis, analyzing reminder messages. Be very permissive and helpful.
 
 User message: "${messageText}"
 
-Analyze the message and determine:
-1. Is it a reminder request?
-2. Does it have an action (what to do)?
-3. Does it have time information?
-4. Fix common typos
+ALWAYS try to find SOMETHING useful in the message, even if unclear.
 
 TIME FORMATS TO RECOGNIZE:
-- "18.53" or "18:53" = 6:53 PM (24-hour format)
-- "6pm", "6:30pm" = regular format
-- "tomorrow", "Monday", "17.09" = date info
+- "20.00", "20:00", "8pm", "8:30pm" 
+- "18.53", "6:53pm"
+- "tomorrow", "today", "Monday"
 
-FIX TYPOS:
-- "gum" → "gym"
-- "doc" → "doctor"
-- "meds" → "medicine"
-- "mom/dad" → keep as is
+ACTION KEYWORDS:
+- Any verb: call, take, go, meeting, gym, etc.
+- Even single words: "vitamins", "mom", "dad"
 
-IMPORTANT: Only set isRecurring to true if user EXPLICITLY requests recurring with words like:
-- "daily", "every day", "each day"
-- "weekly", "every week", "each week" 
-- "monthly", "every month", "each month"
-- "recurring", "repeat"
+Be VERY generous in interpretation. If there's ANY action word and ANY time reference, mark as isReminder: true.
 
 Respond with JSON only:
 {
   "isReminder": true/false,
   "hasAction": true/false,
   "hasTime": true/false,
-  "task": "corrected action description (if found)",
-  "originalTask": "original task from user",
-  "timeExpression": "time found (if any)",
-  "timeOnly": true/false,
-  "actionOnly": true/false,
-  "timeFound": true/false,
-  "needsTime": true/false,
-  "typosCorrected": true/false,
+  "task": "what they want to be reminded about",
+  "timeExpression": "any time found",
+  "timeOnly": false,
+  "actionOnly": false,
+  "needsClarification": true/false,
   "isRecurring": false,
-  "recurrencePattern": null,
-  "clarificationNeeded": true/false
+  "recurrencePattern": null
 }
 
 Examples:
-- "18.53" → {"isReminder": false, "hasAction": false, "hasTime": true, "timeOnly": true}
-- "call mom" → {"isReminder": true, "hasAction": true, "hasTime": false, "actionOnly": true, "task": "call mom"}
-- "call mom at 18.53" → {"isReminder": true, "hasAction": true, "hasTime": true, "timeFound": true, "task": "call mom", "timeExpression": "18.53"}`;
+- "20.00 take vitamins" → {"isReminder": true, "hasAction": true, "hasTime": true, "task": "take vitamins", "timeExpression": "20.00"}
+- "take vitamins at 20.00" → {"isReminder": true, "hasAction": true, "hasTime": true, "task": "take vitamins", "timeExpression": "20.00"}
+- "vitamins" → {"isReminder": true, "hasAction": true, "hasTime": false, "actionOnly": true, "task": "vitamins"}
+- "20.00" → {"isReminder": false, "hasAction": false, "hasTime": true, "timeOnly": true}
+- "hello" → {"isReminder": false, "hasAction": false, "hasTime": false}
+
+Be generous - if unsure, assume it's a reminder attempt.`;
 
   try {
     const result = await askChatGPT(messageText, systemMessage);
-    return result || { isReminder: false };
+    return result || { isReminder: false, needsClarification: true };
   } catch (error) {
     console.error('Error analyzing reminder:', error);
-    return { isReminder: false };
+    // Return fallback if ChatGPT fails
+    return { isReminder: false, needsClarification: true };
   }
 }
 
@@ -341,7 +332,7 @@ async function isDuplicateReminder(userId, message) {
       userId: userId,
       message: { $regex: new RegExp(message.substring(0, 10), 'i') },
       isCompleted: false,
-      createdAt: { $gt: new Date(Date.now() - 24 * 60 * 60 * 1000) } // Last 24 hours
+      createdAt: { $gt: new Date(Date.now() - 24 * 60 * 60 * 1000) }
     });
     return !!similar;
   } catch (error) {
@@ -363,7 +354,7 @@ async function generateDuplicateMotivation(task, userName) {
   return motivations[Math.floor(Math.random() * motivations.length)];
 }
 
-// IMPROVED Twilio WhatsApp function with robust error handling
+// IMPROVED Twilio WhatsApp function
 async function sendWhatsAppMessage(to, message) {
   try {
     const authToken = Buffer.from(`${process.env.TWILIO_ACCOUNT_SID}:${process.env.TWILIO_AUTH_TOKEN}`).toString('base64');
@@ -409,13 +400,20 @@ async function sendWhatsAppMessage(to, message) {
   }
 }
 
-// ENHANCED time parsing function - handles 18.53 = 6:53 PM
+// ROBUST time parsing function - handles all formats
 function parseReminderWithTimezone(messageText, task, timezoneOffset = 0) {
   try {
-    let parsed = chrono.parseDate(messageText);
+    let parsed = null;
+    
+    // Try chrono first
+    try {
+      parsed = chrono.parseDate(messageText);
+    } catch (e) {
+      console.log('Chrono failed, trying manual parsing');
+    }
     
     if (!parsed) {
-      // Handle 24-hour format like "18.53" or "18:53"
+      // Handle 24-hour format like "20.00", "20:00", "18.53"
       const time24Match = messageText.match(/(\d{1,2})[.:](\d{2})/);
       if (time24Match) {
         const hours = parseInt(time24Match[1]);
@@ -423,7 +421,8 @@ function parseReminderWithTimezone(messageText, task, timezoneOffset = 0) {
         
         if (hours >= 0 && hours <= 23 && minutes >= 0 && minutes <= 59) {
           const today = new Date();
-          const timeToday = new Date(today.getFullYear(), today.getMonth(), today.getDate(), hours, minutes);
+          const timeToday = new Date();
+          timeToday.setHours(hours, minutes, 0, 0);
           
           if (timeToday > new Date()) {
             parsed = timeToday; // Same day
@@ -439,21 +438,26 @@ function parseReminderWithTimezone(messageText, task, timezoneOffset = 0) {
     
     if (!parsed) {
       // Handle regular time patterns like "at 8am", "at 3pm"
-      const timeMatch = messageText.match(/at\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm))/i);
+      const timeMatch = messageText.match(/(?:at\s+)?(\d{1,2}(?::\d{2})?\s*(?:am|pm))/i);
       if (timeMatch) {
         const timeStr = timeMatch[1];
-        const today = new Date();
-        const timeToday = chrono.parseDate(`today at ${timeStr}`);
-        
-        if (timeToday && timeToday > new Date()) {
-          parsed = timeToday;
-        } else {
-          parsed = chrono.parseDate(`tomorrow at ${timeStr}`);
+        try {
+          const today = new Date();
+          const timeToday = chrono.parseDate(`today at ${timeStr}`);
+          
+          if (timeToday && timeToday > new Date()) {
+            parsed = timeToday;
+          } else {
+            parsed = chrono.parseDate(`tomorrow at ${timeStr}`);
+          }
+        } catch (e) {
+          console.log('Failed to parse with chrono:', timeStr);
         }
       }
     }
     
     if (!parsed) {
+      // Handle relative terms
       if (messageText.toLowerCase().includes('morning')) {
         const morning = new Date();
         morning.setHours(8, 0, 0, 0);
@@ -476,7 +480,10 @@ function parseReminderWithTimezone(messageText, task, timezoneOffset = 0) {
       }
     }
     
-    if (!parsed) return null;
+    if (!parsed) {
+      console.log('Could not parse time from:', messageText);
+      return null;
+    }
     
     const utcTime = new Date(parsed.getTime() - (timezoneOffset * 60 * 60 * 1000));
     
@@ -518,13 +525,12 @@ async function checkTwilioAccountStatus() {
   }
 }
 
-// FIXED: Enhanced cleanup function - remove old completed reminders
+// Enhanced cleanup function
 async function cleanupOldReminders() {
   try {
     const now = new Date();
     const threeDaysAgo = new Date(now.getTime() - 3 * 24 * 60 * 60 * 1000);
     
-    // Mark any old incomplete reminders as completed
     const stuckResult = await Reminder.updateMany(
       {
         scheduledTime: { $lt: now },
@@ -539,10 +545,9 @@ async function cleanupOldReminders() {
     
     console.log(`🧹 Marked ${stuckResult.modifiedCount} old reminders as completed`);
     
-    // Delete very old completed reminders to keep database clean
     const deleteResult = await Reminder.deleteMany({
       isCompleted: true,
-      createdAt: { $lt: new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000) } // Older than 30 days
+      createdAt: { $lt: new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000) }
     });
     
     console.log(`🗑️ Deleted ${deleteResult.deletedCount} old completed reminders`);
@@ -600,7 +605,7 @@ app.post('/webhook', async (req, res) => {
   }
 });
 
-// MAIN message handler - COMPLETELY FIXED with all improvements
+// MAIN message handler - ROBUST with fallback help
 async function handleIncomingMessage(message, contact) {
   try {
     const userId = message.from;
@@ -628,17 +633,15 @@ async function handleIncomingMessage(message, contact) {
     user.messageCount += 1;
     await user.save();
 
-    // IMPROVED setup flow with better onboarding
+    // IMPROVED setup flow
     if (!user.isSetup) {
       if (!user.preferredName) {
         // Check if they sent a reminder request instead of name
         const analysis = await analyzeReminder(messageText, userName);
         
-        if (analysis.isReminder) {
-          // They sent a reminder without giving name - get name first
+        if (analysis && analysis.isReminder) {
           await sendWhatsAppMessage(userId, `Hey there! 👋\n\nI'm your personal assistant here to remind you of important stuff — and give you a little motivation when needed.\n\nBut first, what should I call you? 😊\nJust send me your name, and I'll remember it from now on.`);
           
-          // Store their reminder request for after name setup
           user.pendingReminder = {
             originalMessage: messageText,
             needsProcessing: true
@@ -647,7 +650,6 @@ async function handleIncomingMessage(message, contact) {
           return;
         }
         
-        // Regular name setup
         const cleanName = messageText.replace(/[^a-zA-Z\s]/g, '').trim();
         if (cleanName && cleanName.length > 0 && cleanName.length < 20) {
           user.preferredName = cleanName;
@@ -667,7 +669,6 @@ async function handleIncomingMessage(message, contact) {
           user.timezoneOffset = timezoneInfo.timezoneOffset;
           user.isSetup = true;
           
-          // Process any pending reminder from name setup
           let welcomeMsg = `${timezoneInfo.confirmation}\n\n✅ Setup complete!\n\nNow I'm ready — what would you like me to remind you about?\n\nYou can write something like:\n📝 *Call mom on 17.09 at 9pm*\n📌 *Dentist appointment tomorrow at 3pm*`;
           
           if (user.pendingReminder && user.pendingReminder.needsProcessing) {
@@ -679,7 +680,6 @@ async function handleIncomingMessage(message, contact) {
             
             await sendWhatsAppMessage(userId, welcomeMsg);
             
-            // Process the pending reminder
             const fakeMessage = { from: userId, text: { body: pendingMessage } };
             await handleIncomingMessage(fakeMessage, contact);
             return;
@@ -694,7 +694,7 @@ async function handleIncomingMessage(message, contact) {
       }
     }
 
-    // Handle pending reminder confirmations - NO "OK" responses anywhere!
+    // Handle pending reminder confirmations - NO "OK" responses
     if (user.pendingReminder && (messageText.toLowerCase() === 'yes' || messageText.toLowerCase() === 'y')) {
       const usageCheck = await checkUsageLimits(user);
       if (!usageCheck.withinReminderLimit) {
@@ -708,7 +708,6 @@ async function handleIncomingMessage(message, contact) {
       const pendingData = user.pendingReminder;
       
       try {
-        // Check for duplicates
         const isDuplicate = await isDuplicateReminder(userId, pendingData.message);
         
         const reminder = new Reminder({
@@ -730,7 +729,6 @@ async function handleIncomingMessage(message, contact) {
         user.pendingReminder = null;
         await user.save();
         
-        // Different response for duplicates
         if (isDuplicate) {
           const duplicateMsg = await generateDuplicateMotivation(pendingData.message, user.preferredName);
           await sendWhatsAppMessage(userId, `${duplicateMsg}\n\n📅 ${pendingData.userLocalTime || 'Scheduled'}\n\nAll set! 🎯`);
@@ -786,16 +784,29 @@ async function handleIncomingMessage(message, contact) {
       return;
     }
     
-    // ENHANCED reminder analysis with all new features
-    const analysis = await analyzeReminder(messageText, user.preferredName);
+    // ENHANCED reminder analysis with FALLBACK HELP
+    let analysis = null;
+    try {
+      analysis = await analyzeReminder(messageText, user.preferredName);
+    } catch (error) {
+      console.error('Analysis failed:', error);
+      // Fallback to basic detection
+      analysis = { isReminder: false, needsClarification: true };
+    }
     
-    // Handle time-only messages (NEW)
+    // If analysis failed or unclear, provide helpful guidance
+    if (!analysis || analysis.needsClarification) {
+      await sendWhatsAppMessage(userId, `I'd love to help you set a reminder! 😊\n\nCould you try this format?\n\n🕐 *Action + Date + Time*\n\nExamples:\n📝 *"Take vitamins at 20:00 today"*\n📌 *"Call mom tomorrow at 6pm"*\n🏋️ *"Gym on Monday at 7pm"*`);
+      return;
+    }
+    
+    // Handle time-only messages
     if (analysis.timeOnly) {
       await sendWhatsAppMessage(userId, `Oops, I need a bit more info 😅\n\nWhat should I remind you *about* at that time?\n\nPlease send something like:\n📝 *Take medicine tomorrow at 10am*`);
       return;
     }
     
-    // Handle action-only messages (NEW)
+    // Handle action-only messages
     if (analysis.actionOnly) {
       await sendWhatsAppMessage(userId, `Got it — but when should I remind you? 🕒\n\nPlease include a time like:\n📌 *Call dad at 5pm today*\n📌 *Drink water tomorrow at 9am*`);
       return;
@@ -803,7 +814,7 @@ async function handleIncomingMessage(message, contact) {
     
     if (analysis && analysis.isReminder) {
       if (analysis.isRecurring) {
-        if (analysis.timeFound) {
+        if (analysis.hasTime) {
           const reminderData = parseReminderWithTimezone(messageText, analysis.task, user.timezoneOffset);
           
           if (reminderData && reminderData.scheduledTime > new Date()) {
@@ -828,15 +839,12 @@ async function handleIncomingMessage(message, contact) {
         return;
       }
       
-      // Handle regular reminders with improved time parsing
-      if ((analysis.hasAction && analysis.hasTime) || (analysis.timeFound && !analysis.needsTime)) {
+      // Handle regular reminders
+      if (analysis.hasAction && analysis.hasTime) {
         const reminderData = parseReminderWithTimezone(messageText, analysis.task, user.timezoneOffset);
         
         if (reminderData && reminderData.scheduledTime > new Date()) {
           let confirmationMsg = `📝 Confirm reminder:\n\n"${reminderData.message}"`;
-          if (analysis.typosCorrected && analysis.originalTask) {
-            confirmationMsg = `📝 Confirm reminder (I made some corrections):\n\n"${reminderData.message}"`;
-          }
           
           const dayName = new Date(reminderData.scheduledTime.getTime() + (user.timezoneOffset * 60 * 60 * 1000)).toLocaleDateString('en-US', { weekday: 'long' });
           
@@ -851,19 +859,18 @@ async function handleIncomingMessage(message, contact) {
         } else {
           await sendWhatsAppMessage(userId, `⚠️ That time has passed, ${user.preferredName}.\n\nTry: "${analysis.task} tomorrow at 9am"`);
         }
-      } else if (analysis.clarificationNeeded) {
-        await sendWhatsAppMessage(userId, `🤔 I think you mean "${analysis.task}" but I'm not sure.\n\nDid you mean:\n• "${analysis.task} at [time]"?\n\nPlease clarify with specific day and time.`);
       } else {
-        await sendWhatsAppMessage(userId, `📝 Task: "${analysis.task}"\n\n⚠️ Please specify exact day and time:\n\n• "at 7pm today"\n• "at 3pm tomorrow"\n• "Monday at 2pm"`);
+        // Missing action or time - provide helpful guidance
+        await sendWhatsAppMessage(userId, `I can see you want to set a reminder! 😊\n\nCould you be more specific?\n\n🕐 *Action + Date + Time*\n\nExamples:\n📝 *"Take vitamins at 8pm today"*\n📌 *"Call mom tomorrow at 3pm"*`);
       }
       return;
     }
     
-    // General help
+    // FALLBACK: If nothing else worked, provide general help
     const remainingMsgs = usageCheck.remainingMessages;
     let warningText = remainingMsgs <= 10 ? `\n\n⚠️ ${remainingMsgs} messages left today` : '';
     
-    await sendWhatsAppMessage(userId, `Hi ${user.preferredName}! 🤖\n\nSet reminders with specific times:\n\n• "gym at 7pm today"\n• "call mom at 3pm tomorrow"\n• "meeting Monday at 2pm"\n\nCommands: "list reminders"${warningText}`);
+    await sendWhatsAppMessage(userId, `Hi ${user.preferredName}! 🤖\n\nI help you set reminders with specific times:\n\n• "gym at 7pm today"\n• "call mom at 3pm tomorrow"\n• "meeting Monday at 2pm"\n\nCommands: "list reminders"${warningText}`);
     
   } catch (error) {
     console.error('❌ Handler error:', error);
@@ -875,38 +882,35 @@ async function handleIncomingMessage(message, contact) {
   }
 }
 
-// FIXED: One-time reminder cron job - send once and mark complete
-cron.schedule('*/5 * * * *', async () => { // Every 5 minutes
+// FIXED: One-time reminder cron job
+cron.schedule('*/5 * * * *', async () => {
   try {
     console.log('⏰ Checking for due reminders...');
     
     const now = new Date();
     
-    // Find reminders that are due and haven't been sent yet
     const dueReminders = await Reminder.find({
-      scheduledTime: { $lte: now }, // Time has arrived
-      isCompleted: false, // Not completed yet
-      lastSentAt: null // Never been sent
-    }).limit(10); // Process max 10 at a time
+      scheduledTime: { $lte: now },
+      isCompleted: false,
+      lastSentAt: null
+    }).limit(10);
 
     console.log(`⏰ Found ${dueReminders.length} due reminders`);
 
     for (const reminder of dueReminders) {
       try {
-        // IMMEDIATELY mark as sent to prevent duplicates (atomic operation)
         const marked = await Reminder.findOneAndUpdate(
           { 
             _id: reminder._id, 
-            lastSentAt: null // Only update if not already marked
+            lastSentAt: null
           },
           { 
             lastSentAt: now,
-            isCompleted: true // ALWAYS mark as completed after sending
+            isCompleted: true
           },
           { new: true }
         );
         
-        // If marking failed, another process already handled it
         if (!marked) {
           console.log('⏭️ Reminder already processed');
           continue;
@@ -925,9 +929,7 @@ cron.schedule('*/5 * * * *', async () => { // Every 5 minutes
         if (result.success) {
           console.log(`✅ Sent one-time reminder: ${reminder.message}`);
           
-          // ONLY create next reminder if user specifically requested recurring
           if (reminder.isRecurring && reminder.recurrencePattern && reminder.nextOccurrence) {
-            // Validate recurring pattern (no hourly allowed)
             if (['daily', 'weekly', 'monthly'].includes(reminder.recurrencePattern)) {
               const nextReminder = new Reminder({
                 userId: reminder.userId,
@@ -944,20 +946,15 @@ cron.schedule('*/5 * * * *', async () => { // Every 5 minutes
               
               await nextReminder.save({ validateBeforeSave: false });
               console.log(`🔄 Created next ${reminder.recurrencePattern} reminder for ${nextReminder.userLocalTime}`);
-            } else {
-              console.log(`❌ Invalid recurrence pattern: ${reminder.recurrencePattern}`);
             }
           }
-          // If not recurring, reminder is just completed - NO MORE SENDS
           
         } else {
           console.log(`❌ Failed to send reminder: ${result.error}`);
-          // Even if send fails, keep it marked as completed to prevent spam
         }
       } catch (error) {
         console.error(`❌ Error processing reminder:`, error);
         
-        // Always mark as completed to prevent infinite retries
         try {
           await Reminder.findByIdAndUpdate(reminder._id, { 
             isCompleted: true,
@@ -976,43 +973,33 @@ cron.schedule('*/5 * * * *', async () => { // Every 5 minutes
 // Health check
 app.get('/', (req, res) => {
   res.json({ 
-    status: '🤖 Jarvis - Smart Reminder Assistant (ALL FIXES APPLIED)',
-    message: 'Production-ready with enhanced UX and all improvements',
+    status: '🤖 Jarvis - Smart Reminder Assistant (ROBUST VERSION)',
+    message: 'Production-ready with fallback help and robust error handling',
     timestamp: new Date().toISOString(),
     environment: process.env.NODE_ENV || 'development',
     uptime: process.uptime(),
     mongodb_status: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
     twilio_status: process.env.TWILIO_ACCOUNT_SID ? 'configured' : 'not configured',
     openai_status: process.env.OPENAI_API_KEY ? 'configured' : 'not configured',
-    all_fixes_applied: [
+    robust_features: [
       '🛑 NO MORE "OK" RESPONSES: Completely removed',
-      '🕐 ENHANCED TIME PARSING: 18.53 = 6:53 PM working',
-      '👋 IMPROVED ONBOARDING: Welcoming messages as requested',
+      '🕐 ENHANCED TIME PARSING: 20.00 = 8:00 PM working',
+      '👋 IMPROVED ONBOARDING: Welcoming messages',
       '🔄 BETTER "NO" RESPONSE: Helpful format guide',
       '🎯 DUPLICATE DETECTION: Different motivational responses',
-      '⚠️ TIME-ONLY HANDLING: Asks for action',
-      '📝 ACTION-ONLY HANDLING: Asks for time',
+      '⚠️ FALLBACK HELP: Always provides guidance when confused',
+      '🤖 ROBUST AI ANALYSIS: Handles failures gracefully',
+      '📝 CLEAR EXAMPLES: Shows exact format users need',
       '🧹 DATABASE CLEANUP: Auto-maintenance',
-      '💰 COST OPTIMIZED: One-time reminders only',
-      '🔒 SPAM PROTECTION: Multiple safeguards'
+      '💰 COST OPTIMIZED: One-time reminders only'
     ],
-    new_features: [
-      '🤖 Enhanced ChatGPT integration',
-      '🕐 24-hour time format support (18.53)',
-      '📱 Smart onboarding flow',
-      '🔄 Duplicate reminder motivation',
-      '⚡ Improved error messages',
-      '🎯 Better user experience',
-      '💪 Contextual motivational messages',
-      '📍 Location-based timezone setup'
-    ],
-    core_features: [
-      '✅ One-time reminders (default)',
-      '🔄 Explicit recurring reminders',
-      '📋 Reminder management',
-      '🎯 AI-powered conversation',
-      '🛡️ Robust error handling',
-      '💵 Cost-optimized operations'
+    fallback_system: [
+      '✅ If analysis fails → helpful format guide',
+      '✅ If time parsing fails → example messages',
+      '✅ If unclear request → specific examples',
+      '✅ If no action → asks for action with examples',
+      '✅ If no time → asks for time with examples',
+      '✅ Always responds with something helpful'
     ]
   });
 });
@@ -1023,16 +1010,14 @@ app.use((error, req, res, next) => {
   res.status(500).json({ error: 'Internal server error' });
 });
 
-// Server startup with enhanced cleanup and verification
+// Server startup
 app.listen(PORT, '0.0.0.0', async () => {
   console.log(`🚀 Server running on port ${PORT}`);
   console.log('🤖 Jarvis Smart Reminder Assistant is ready!');
   
-  // Clean up old reminders on startup
   console.log('🧹 Cleaning up old reminders...');
   await cleanupOldReminders();
   
-  // Check Twilio account status
   console.log('📊 Checking Twilio account status...');
   const accountStatus = await checkTwilioAccountStatus();
   
@@ -1044,12 +1029,12 @@ app.listen(PORT, '0.0.0.0', async () => {
   
   console.log('🎯 REMINDER POLICY: Send once and complete (unless explicitly recurring)');
   console.log('🚫 NO "OK" RESPONSES: Clean conversation flow');
-  console.log('🕐 ENHANCED TIME PARSING: 18.53 = 6:53 PM support');
-  console.log('👋 IMPROVED ONBOARDING: Welcoming user experience');
+  console.log('🕐 ROBUST TIME PARSING: 20.00 = 8:00 PM support');
+  console.log('💬 FALLBACK HELP: Always provides guidance when confused');
   console.log('✅ All systems ready for production!');
 });
 
-// Graceful shutdown handlers
+// Graceful shutdown
 process.on('SIGINT', async () => {
   console.log('🔄 Shutting down gracefully...');
   try {
