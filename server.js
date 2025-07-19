@@ -69,7 +69,7 @@ async function connectToMongoDB() {
 
 connectToMongoDB();
 
-// User Schema with pending reminder
+// User Schema with reminder count
 const userSchema = new mongoose.Schema({
   userId: { type: String, required: true, unique: true },
   userName: { type: String, required: true },
@@ -77,9 +77,10 @@ const userSchema = new mongoose.Schema({
   location: { type: String, default: null },
   timezoneOffset: { type: Number, default: 0 },
   messageCount: { type: Number, default: 0 },
+  reminderCount: { type: Number, default: 0 }, // Daily reminder count
   lastResetDate: { type: Date, default: Date.now },
   isSetup: { type: Boolean, default: false },
-  pendingReminder: { type: Object, default: null }, // For confirmation flow
+  pendingReminder: { type: Object, default: null },
   createdAt: { type: Date, default: Date.now }
 });
 
@@ -104,6 +105,7 @@ const Reminder = mongoose.model('Reminder', reminderSchema);
 // Usage limits
 const USAGE_LIMITS = {
   FREE_TIER_MESSAGES: 50,
+  FREE_TIER_REMINDERS: 5, // Daily reminder limit
   RESET_PERIOD_HOURS: 24
 };
 
@@ -114,14 +116,38 @@ async function checkUsageLimits(user) {
   
   if (hoursElapsed >= USAGE_LIMITS.RESET_PERIOD_HOURS) {
     user.messageCount = 0;
+    user.reminderCount = 0; // Reset reminder count too
     user.lastResetDate = now;
     await user.save();
   }
   
   return {
     withinLimit: user.messageCount < USAGE_LIMITS.FREE_TIER_MESSAGES,
-    remainingMessages: Math.max(0, USAGE_LIMITS.FREE_TIER_MESSAGES - user.messageCount)
+    withinReminderLimit: user.reminderCount < USAGE_LIMITS.FREE_TIER_REMINDERS,
+    remainingMessages: Math.max(0, USAGE_LIMITS.FREE_TIER_MESSAGES - user.messageCount),
+    remainingReminders: Math.max(0, USAGE_LIMITS.FREE_TIER_REMINDERS - user.reminderCount)
   };
+}
+
+// Calculate next occurrence for recurring reminders
+function calculateNextOccurrence(currentTime, pattern) {
+  const next = new Date(currentTime);
+  
+  switch (pattern) {
+    case 'daily':
+      next.setDate(next.getDate() + 1);
+      break;
+    case 'weekly':
+      next.setDate(next.getDate() + 7);
+      break;
+    case 'monthly':
+      next.setMonth(next.getMonth() + 1);
+      break;
+    default:
+      return null;
+  }
+  
+  return next;
 }
 
 // Fixed ChatGPT function
@@ -183,8 +209,8 @@ Respond with JSON only:
 }
 
 Examples:
-- "gym at 7pm" → {"isReminder": true, "task": "gym", "timeFound": true, "timeExpression": "7pm", "motivation": "Stay strong! 💪", "needsTime": false}
-- "call mom" → {"isReminder": true, "task": "call mom", "timeFound": false, "motivation": "Family matters! 💕", "needsTime": true}
+- "gym at 7pm" → {"isReminder": true, "task": "gym", "timeFound": true, "timeExpression": "7pm", "motivation": "Stay strong! 💪", "needsTime": false, "isRecurring": false}
+- "call mom" → {"isReminder": true, "task": "call mom", "timeFound": false, "motivation": "Family matters! 💕", "needsTime": true, "isRecurring": false}
 - "vitamin morning" → {"isReminder": true, "task": "take vitamin", "timeFound": true, "timeExpression": "morning", "motivation": "Health first! 🌟", "needsTime": false, "isRecurring": false}
 - "gym every day at 7am" → {"isReminder": true, "task": "gym", "timeFound": true, "timeExpression": "7am", "motivation": "Stay strong! 💪", "needsTime": false, "isRecurring": true, "recurrencePattern": "daily"}
 - "water plants weekly" → {"isReminder": true, "task": "water plants", "timeFound": false, "motivation": "Green life! 🌱", "needsTime": true, "isRecurring": true, "recurrencePattern": "weekly"}
@@ -224,6 +250,48 @@ Examples:
   } catch (error) {
     console.error('Error detecting timezone:', error);
     return null;
+  }
+}
+
+// Generate contextual motivational message for reminders
+async function generateContextualMessage(task, userName) {
+  const systemMessage = `You are an empathetic life coach creating a unique, personalized reminder message.
+
+Task: "${task}"
+User: ${userName}
+
+Analyze the task context and create a completely original 2-part motivational message:
+1. Present moment encouragement (why this matters now)
+2. Future positive outcome (how they'll feel after)
+
+Respond with JSON only:
+{
+  "encouragement": "unique motivating message for doing this task now",
+  "reward": "unique positive message about the outcome/feeling after"
+}
+
+Be creative, vary your language, consider:
+- Task type (health, work, personal, fitness, family, etc.)
+- Time of day implications
+- Emotional benefits
+- Personal growth aspects
+- Practical benefits
+- Social connections
+
+Make each message feel fresh, personal, and specifically crafted for this exact situation. Never repeat generic phrases.`;
+
+  try {
+    const result = await askChatGPT(task, systemMessage);
+    return result || {
+      encouragement: "Time to take action - you've got this!",
+      reward: "You'll feel accomplished and proud after completing this!"
+    };
+  } catch (error) {
+    console.error('Error generating contextual message:', error);
+    return {
+      encouragement: "Time to take action - you've got this!",
+      reward: "You'll feel accomplished and proud after completing this!"
+    };
   }
 }
 
@@ -409,66 +477,7 @@ async function handleIncomingMessage(message, contact) {
       await user.save();
     }
 
-    // Generate contextual motivational message for reminders
-async function generateContextualMessage(task, userName) {
-  const systemMessage = `You are an empathetic life coach creating a unique, personalized reminder message.
-
-Task: "${task}"
-User: ${userName}
-
-Analyze the task context and create a completely original 2-part motivational message:
-1. Present moment encouragement (why this matters now)
-2. Future positive outcome (how they'll feel after)
-
-Respond with JSON only:
-{
-  "encouragement": "unique motivating message for doing this task now",
-  "reward": "unique positive message about the outcome/feeling after"
-}
-
-Be creative, vary your language, consider:
-- Task type (health, work, personal, fitness, family, etc.)
-- Time of day implications
-- Emotional benefits
-- Personal growth aspects
-- Practical benefits
-- Social connections
-
-Make each message feel fresh, personal, and specifically crafted for this exact situation. Never repeat generic phrases.`;
-
-  try {
-    const result = await askChatGPT(task, systemMessage);
-    return result || {
-      encouragement: "Time to take action - you've got this!",
-      reward: "You'll feel accomplished and proud after completing this!"
-    };
-  } catch (error) {
-    console.error('Error generating contextual message:', error);
-    return {
-      encouragement: "Time to take action - you've got this!",
-      reward: "You'll feel accomplished and proud after completing this!"
-    };
-  }
-}
-function calculateNextOccurrence(currentTime, pattern) {
-  const next = new Date(currentTime);
-  
-  switch (pattern) {
-    case 'daily':
-      next.setDate(next.getDate() + 1);
-      break;
-    case 'weekly':
-      next.setDate(next.getDate() + 7);
-      break;
-    case 'monthly':
-      next.setMonth(next.getMonth() + 1);
-      break;
-    default:
-      return null;
-  }
-  
-  return next;
-}
+    // Check usage limits
     const usageCheck = await checkUsageLimits(user);
     if (!usageCheck.withinLimit) {
       await sendWhatsAppMessage(userId, `🚫 Daily limit reached (${USAGE_LIMITS.FREE_TIER_MESSAGES} messages).\n\n⭐ Upgrade for unlimited reminders!`);
@@ -516,6 +525,16 @@ function calculateNextOccurrence(currentTime, pattern) {
     
     // Handle pending reminder confirmations
     if (user.pendingReminder && (messageText.toLowerCase() === 'yes' || messageText.toLowerCase() === 'y')) {
+      // Check reminder limit before confirming
+      const usageCheck = await checkUsageLimits(user);
+      if (!usageCheck.withinReminderLimit) {
+        user.pendingReminder = null;
+        await user.save();
+        
+        await sendWhatsAppMessage(userId, `💙 Hey ${user.preferredName}, you've reached your daily limit of ${USAGE_LIMITS.FREE_TIER_REMINDERS} reminders!\n\nI love helping you stay organized! 😊\n\n✨ **Upgrade to unlimited** and I can help you remember everything that matters!\n\n🎯 More reminders = Better life organization\n💝 Just thinking of your success!`);
+        return;
+      }
+      
       const pendingData = user.pendingReminder;
       
       const reminder = new Reminder({
@@ -531,11 +550,16 @@ function calculateNextOccurrence(currentTime, pattern) {
       
       await reminder.save();
       
+      // Increment reminder count
+      user.reminderCount += 1;
       user.pendingReminder = null;
       await user.save();
       
       const recurringText = pendingData.isRecurring ? ` (${pendingData.recurrencePattern})` : '';
-      await sendWhatsAppMessage(userId, `✅ ${pendingData.isRecurring ? 'Recurring reminder' : 'Reminder'} confirmed!\n\n"${pendingData.message}"${recurringText}\n📅 ${pendingData.userLocalTime}\n\nAll set, ${user.preferredName}! 🎯`);
+      const remainingReminders = USAGE_LIMITS.FREE_TIER_REMINDERS - user.reminderCount;
+      const limitWarning = remainingReminders <= 2 ? `\n\n💫 ${remainingReminders} reminders left today` : '';
+      
+      await sendWhatsAppMessage(userId, `✅ ${pendingData.isRecurring ? 'Recurring reminder' : 'Reminder'} confirmed!\n\n"${pendingData.message}"${recurringText}\n📅 ${pendingData.userLocalTime}\n\nAll set, ${user.preferredName}! 🎯${limitWarning}`);
       return;
     }
     
@@ -575,7 +599,7 @@ function calculateNextOccurrence(currentTime, pattern) {
         });
         await sendWhatsAppMessage(userId, response);
       } else {
-        await sendWhatsAppMessage(userId, `📋 No reminders set, ${user.preferredName}.\n\nTry: "gym at 7pm"`);
+        await sendWhatsAppMessage(userId, `📋 No reminders set, ${user.preferredName}.\n\nTry: "gym at 7pm today"`);
       }
       return;
     }
@@ -706,7 +730,7 @@ cron.schedule('* * * * *', async () => {
 app.get('/', (req, res) => {
   res.json({ 
     status: '🤖 Jarvis - Smart Reminder Assistant',
-    message: 'Direct, efficient, AI-powered reminders',
+    message: 'Direct, efficient, AI-powered reminders with contextual motivation',
     timestamp: new Date().toISOString(),
     environment: process.env.NODE_ENV || 'development',
     uptime: process.uptime(),
