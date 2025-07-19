@@ -86,13 +86,13 @@ const userSchema = new mongoose.Schema({
 
 const User = mongoose.model('User', userSchema);
 
-// Reminder Schema with recurring support
+// FIXED Reminder Schema - userLocalTime is optional
 const reminderSchema = new mongoose.Schema({
   userId: { type: String, required: true },
   userName: { type: String, required: true },
   message: { type: String, required: true },
   scheduledTime: { type: Date, required: true },
-  userLocalTime: { type: String, required: true },
+  userLocalTime: { type: String, default: '' }, // FIXED: Made optional with default
   isCompleted: { type: Boolean, default: false },
   isRecurring: { type: Boolean, default: false },
   recurrencePattern: { type: String, default: null },
@@ -334,7 +334,6 @@ async function sendWhatsAppMessage(to, message) {
   } catch (error) {
     console.error('❌ Twilio Send Error:', error.message);
     
-    // Handle specific Twilio errors gracefully
     if (error.response?.data) {
       const errorData = error.response.data;
       const errorCode = error.response.headers['x-twilio-error-code'];
@@ -345,13 +344,11 @@ async function sendWhatsAppMessage(to, message) {
         status: error.response.status
       });
       
-      // Handle rate limiting specifically
       if (errorCode === '63038' || errorData.message?.includes('daily messages limit')) {
         console.error('🚫 RATE LIMIT: Twilio account daily message limit reached');
         return { success: false, error: 'rate_limited', code: '63038' };
       }
       
-      // Handle other common Twilio errors
       if (errorCode === '21211') {
         console.error('📱 Invalid phone number format');
         return { success: false, error: 'invalid_phone', code: '21211' };
@@ -363,7 +360,6 @@ async function sendWhatsAppMessage(to, message) {
       }
     }
     
-    // For other errors, still return an error object instead of throwing
     return { success: false, error: 'unknown', message: error.message };
   }
 }
@@ -604,7 +600,7 @@ async function handleIncomingMessage(message, contact) {
         userName: userName,
         message: pendingData.message,
         scheduledTime: pendingData.scheduledTime,
-        userLocalTime: pendingData.userLocalTime,
+        userLocalTime: pendingData.userLocalTime || new Date(pendingData.scheduledTime).toLocaleString(), // FIXED: Fallback for userLocalTime
         isRecurring: pendingData.isRecurring || false,
         recurrencePattern: pendingData.recurrencePattern || null,
         nextOccurrence: pendingData.isRecurring ? calculateNextOccurrence(pendingData.scheduledTime, pendingData.recurrencePattern) : null
@@ -620,7 +616,7 @@ async function handleIncomingMessage(message, contact) {
       const remainingReminders = USAGE_LIMITS.FREE_TIER_REMINDERS - user.reminderCount;
       const limitWarning = remainingReminders <= 2 ? `\n\n💫 ${remainingReminders} reminders left today` : '';
       
-      const result = await sendWhatsAppMessage(userId, `✅ ${pendingData.isRecurring ? 'Recurring reminder' : 'Reminder'} confirmed!\n\n"${pendingData.message}"${recurringText}\n📅 ${pendingData.userLocalTime}\n\nAll set, ${user.preferredName}! 🎯${limitWarning}`);
+      const result = await sendWhatsAppMessage(userId, `✅ ${pendingData.isRecurring ? 'Recurring reminder' : 'Reminder'} confirmed!\n\n"${pendingData.message}"${recurringText}\n📅 ${pendingData.userLocalTime || 'Scheduled'}\n\nAll set, ${user.preferredName}! 🎯${limitWarning}`);
       
       if (!result.success) {
         console.log('🚫 Cannot send confirmation message - API error:', result.error);
@@ -669,7 +665,7 @@ async function handleIncomingMessage(message, contact) {
         let response = `📋 Your reminders, ${user.preferredName}:\n\n`;
         reminders.forEach((reminder, index) => {
           const recurringText = reminder.isRecurring ? ` (${reminder.recurrencePattern})` : '';
-          response += `${index + 1}. ${reminder.message}${recurringText}\n   📅 ${reminder.userLocalTime}\n\n`;
+          response += `${index + 1}. ${reminder.message}${recurringText}\n   📅 ${reminder.userLocalTime || 'Scheduled'}\n\n`;
         });
         
         const result = await sendWhatsAppMessage(userId, response);
@@ -798,12 +794,17 @@ async function handleIncomingMessage(message, contact) {
   }
 }
 
-// Enhanced cron job for reminders with error handling
+// FIXED: Enhanced cron job to prevent duplicate messages
 cron.schedule('* * * * *', async () => {
   try {
     const now = new Date();
+    const fiveMinutesAgo = new Date(now.getTime() - 5 * 60000); // 5 minute window to catch missed reminders
+    
     const dueReminders = await Reminder.find({
-      scheduledTime: { $lte: now },
+      scheduledTime: { 
+        $lte: now,
+        $gte: fiveMinutesAgo  // FIXED: Only get reminders from last 5 minutes
+      },
       isCompleted: false
     });
 
@@ -811,6 +812,10 @@ cron.schedule('* * * * *', async () => {
 
     for (const reminder of dueReminders) {
       try {
+        // FIXED: Mark as processing immediately to prevent duplicates
+        reminder.isCompleted = true;
+        await reminder.save();
+        
         const user = await User.findOne({ userId: reminder.userId });
         const preferredName = user?.preferredName || 'there';
         
@@ -825,24 +830,39 @@ cron.schedule('* * * * *', async () => {
         if (result.success) {
           // Handle recurring reminders
           if (reminder.isRecurring && reminder.nextOccurrence) {
-            reminder.scheduledTime = reminder.nextOccurrence;
-            reminder.nextOccurrence = calculateNextOccurrence(reminder.nextOccurrence, reminder.recurrencePattern);
-            reminder.userLocalTime = new Date(reminder.scheduledTime.getTime() + (user.timezoneOffset * 60 * 60 * 1000)).toLocaleString();
-            await reminder.save();
+            // Create NEW reminder for next occurrence instead of updating existing one
+            const nextReminder = new Reminder({
+              userId: reminder.userId,
+              userName: reminder.userName,
+              message: reminder.message,
+              scheduledTime: reminder.nextOccurrence,
+              userLocalTime: new Date(reminder.nextOccurrence.getTime() + (user?.timezoneOffset || 0) * 60 * 60 * 1000).toLocaleString(),
+              isCompleted: false,
+              isRecurring: true,
+              recurrencePattern: reminder.recurrencePattern,
+              nextOccurrence: calculateNextOccurrence(reminder.nextOccurrence, reminder.recurrencePattern)
+            });
             
-            console.log(`🔄 Recurring reminder rescheduled: ${reminder.message} for ${reminder.userLocalTime}`);
-          } else {
-            reminder.isCompleted = true;
-            await reminder.save();
+            await nextReminder.save();
+            console.log(`🔄 Next recurring reminder created: ${reminder.message} for ${nextReminder.userLocalTime}`);
           }
           
           console.log(`✅ Reminded ${preferredName}: ${reminder.message}`);
         } else {
           console.log(`❌ Failed to send reminder to ${preferredName}: ${result.error}`);
-          // Don't mark as completed if sending failed - will retry next minute
+          // Keep as completed even if send fails to prevent infinite retries
         }
       } catch (error) {
         console.error(`❌ Reminder error for ${reminder.userId}:`, error);
+        
+        // Ensure reminder is marked as completed even on error
+        try {
+          reminder.isCompleted = true;
+          await reminder.save();
+          console.log(`⚠️ Marked error reminder as completed to prevent duplicates`);
+        } catch (saveError) {
+          console.error(`❌ Could not mark reminder as completed:`, saveError);
+        }
       }
     }
   } catch (error) {
@@ -853,8 +873,8 @@ cron.schedule('* * * * *', async () => {
 // Enhanced health check endpoint
 app.get('/', (req, res) => {
   res.json({ 
-    status: '🤖 Jarvis - Smart Reminder Assistant (Production Ready)',
-    message: 'Direct, efficient, AI-powered reminders with robust error handling',
+    status: '🤖 Jarvis - Smart Reminder Assistant (Production Ready - No Duplicates)',
+    message: 'Direct, efficient, AI-powered reminders with robust error handling and duplicate prevention',
     timestamp: new Date().toISOString(),
     environment: process.env.NODE_ENV || 'development',
     uptime: process.uptime(),
@@ -871,7 +891,8 @@ app.get('/', (req, res) => {
       '🎯 Direct, efficient responses',
       '🛡️ Robust error handling for Twilio rate limits',
       '⚡ Production-ready with graceful failures',
-      '🚫 Usage limits with upgrade prompts'
+      '🚫 Usage limits with upgrade prompts',
+      '🔒 DUPLICATE PREVENTION - No more repeated reminders!'
     ],
     improvements: [
       '✅ Enhanced Twilio error handling',
@@ -879,7 +900,10 @@ app.get('/', (req, res) => {
       '✅ Detailed logging for debugging',
       '✅ Account status monitoring',
       '✅ No app crashes on rate limits',
-      '✅ Improved webhook reliability'
+      '✅ Improved webhook reliability',
+      '✅ FIXED: Duplicate reminder prevention',
+      '✅ FIXED: Schema validation errors',
+      '✅ FIXED: Cron job infinite loops'
     ]
   });
 });
@@ -890,14 +914,20 @@ app.use((error, req, res, next) => {
   res.status(500).json({ error: 'Internal server error' });
 });
 
-// Enhanced server startup
+// Enhanced server startup with Twilio verification
 app.listen(PORT, '0.0.0.0', async () => {
   console.log(`🚀 Server running on port ${PORT}`);
   console.log('🤖 Jarvis Smart Reminder Assistant is ready!');
   
   // Check Twilio account status on startup
   console.log('📊 Checking Twilio account status...');
-  await checkTwilioAccountStatus();
+  const accountStatus = await checkTwilioAccountStatus();
+  
+  if (accountStatus) {
+    console.log('✅ Twilio account verified:', accountStatus.type);
+  } else {
+    console.log('⚠️ Could not verify Twilio account status');
+  }
   
   console.log('✅ All systems ready for production!');
 });
