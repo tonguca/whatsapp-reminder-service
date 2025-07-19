@@ -12,7 +12,6 @@ const PORT = process.env.PORT || 10000;
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Add request logging middleware
 app.use((req, res, next) => {
   console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
   next();
@@ -28,14 +27,12 @@ const requiredEnvVars = {
   OPENAI_API_KEY: process.env.OPENAI_API_KEY
 };
 
-// Check for missing environment variables
 const missingVars = Object.entries(requiredEnvVars)
   .filter(([key, value]) => !value)
   .map(([key]) => key);
 
 if (missingVars.length > 0) {
   console.error('Missing required environment variables:', missingVars);
-  console.error('Please set these variables in your Render dashboard');
   if (process.env.NODE_ENV !== 'production') {
     process.exit(1);
   }
@@ -62,9 +59,6 @@ async function connectToMongoDB() {
       
       if (retries >= maxRetries) {
         console.error('Max retries reached. Could not connect to MongoDB.');
-        if (process.env.NODE_ENV !== 'production') {
-          process.exit(1);
-        }
         return;
       }
       
@@ -75,15 +69,16 @@ async function connectToMongoDB() {
 
 connectToMongoDB();
 
-// Enhanced User Schema
+// User Schema
 const userSchema = new mongoose.Schema({
   userId: { type: String, required: true, unique: true },
   userName: { type: String, required: true },
-  preferredName: { type: String, default: null }, // How they want to be called
-  personality: { type: String, default: null }, // calm, direct, cheerful
-  timezone: { type: String, default: null },
-  timezoneOffset: { type: Number, default: null },
-  setupStage: { type: String, default: 'welcome' }, // welcome, name, personality, timezone, complete
+  preferredName: { type: String, default: null },
+  location: { type: String, default: null },
+  timezoneOffset: { type: Number, default: 0 },
+  messageCount: { type: Number, default: 0 },
+  lastResetDate: { type: Date, default: Date.now },
+  isSetup: { type: Boolean, default: false },
   createdAt: { type: Date, default: Date.now }
 });
 
@@ -96,165 +91,163 @@ const reminderSchema = new mongoose.Schema({
   message: { type: String, required: true },
   scheduledTime: { type: Date, required: true },
   userLocalTime: { type: String, required: true },
-  needsTimeConfirmation: { type: Boolean, default: false },
   isCompleted: { type: Boolean, default: false },
   createdAt: { type: Date, default: Date.now }
 });
 
 const Reminder = mongoose.model('Reminder', reminderSchema);
 
-// Enhanced ChatGPT function
-async function askChatGPT(prompt, systemMessage = '') {
+// Usage limits
+const USAGE_LIMITS = {
+  FREE_TIER_MESSAGES: 50,
+  RESET_PERIOD_HOURS: 24
+};
+
+async function checkUsageLimits(user) {
+  const now = new Date();
+  const timeSinceReset = now - user.lastResetDate;
+  const hoursElapsed = timeSinceReset / (1000 * 60 * 60);
+  
+  if (hoursElapsed >= USAGE_LIMITS.RESET_PERIOD_HOURS) {
+    user.messageCount = 0;
+    user.lastResetDate = now;
+    await user.save();
+  }
+  
+  return {
+    withinLimit: user.messageCount < USAGE_LIMITS.FREE_TIER_MESSAGES,
+    remainingMessages: Math.max(0, USAGE_LIMITS.FREE_TIER_MESSAGES - user.messageCount)
+  };
+}
+
+// Fixed ChatGPT function
+async function askChatGPT(prompt, systemMessage) {
   try {
+    console.log('🤖 ChatGPT analyzing...');
+    
     const response = await axios.post(
       'https://api.openai.com/v1/chat/completions',
       {
         model: 'gpt-4o-mini',
         messages: [
-          {
-            role: 'system',
-            content: systemMessage || 'You are a helpful assistant for a WhatsApp reminder bot.'
-          },
-          {
-            role: 'user',
-            content: prompt
-          }
+          { role: 'system', content: systemMessage },
+          { role: 'user', content: prompt }
         ],
-        max_tokens: 400,
-        temperature: 0.7
+        max_tokens: 250,
+        temperature: 0.3
       },
       {
         headers: {
           'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
           'Content-Type': 'application/json'
         },
-        timeout: 10000
+        timeout: 8000
       }
     );
     
-    return response.data.choices[0].message.content.trim();
+    const result = response.data.choices[0].message.content.trim();
+    console.log('🤖 ChatGPT responded');
+    
+    // Try to parse as JSON, fallback if fails
+    try {
+      return JSON.parse(result);
+    } catch {
+      return { raw: result };
+    }
   } catch (error) {
-    console.error('Error with ChatGPT:', error.response?.data || error.message);
+    console.error('🚨 ChatGPT Error:', error.message);
     return null;
   }
 }
 
-// Enhanced reminder analysis with personality and recurring tasks
-async function analyzeMessage(messageText, userName, personality = 'supportive') {
-  const personalityPrompts = {
-    calm: "You are a calm, gentle, and supportive assistant. Use soothing language and be very understanding.",
-    direct: "You are direct, efficient, and to-the-point. Keep responses concise and focused on the task.",
-    cheerful: "You are cheerful, funny, and energetic! Use emojis, jokes, and upbeat language to motivate users."
-  };
+// Smart reminder analyzer
+async function analyzeReminder(messageText, userName) {
+  const systemMessage = `You are Jarvis, a direct and efficient reminder assistant. Analyze messages for reminder tasks.
 
-  const systemMessage = `${personalityPrompts[personality] || personalityPrompts.calm}
-
-Analyze this message to detect tasks, time references, and recurring patterns.
-
-User's message: "${messageText}"
-
-Understand natural short commands like:
-- "mom check at 3pm" → task: "check on mom", time: "3pm"
-- "vitamin morning" → task: "take vitamin", time: "morning" (suggest 8am)
-- "call Ahmet in 2 hours" → task: "call Ahmet", time: "in 2 hours"
-- "water plants weekly" → task: "water plants", recurring: "weekly"
-- "meds every day 9am" → task: "take meds", time: "9am", recurring: "daily"
+User message: "${messageText}"
 
 Respond with JSON only:
 {
-  "isTask": true/false,
+  "isReminder": true/false,
   "task": "clean task description",
-  "hasTime": true/false,
-  "timeExpression": "extracted time",
-  "isRecurring": true/false,
-  "recurrencePattern": "daily/weekly/monthly" (if recurring),
-  "suggestedTime": "suggested time if unclear",
-  "needsTimeConfirmation": true/false,
-  "motivationalMessage": "message matching your personality style",
-  "clarificationQuestion": "question if time unclear"
-}`;
-
-  try {
-    const result = await askChatGPT(messageText, systemMessage);
-    return JSON.parse(result);
-  } catch (error) {
-    console.error('Error analyzing message:', error);
-    const defaultResponses = {
-      calm: "I'm here to help you stay organized peacefully. What would you like to remember? 🌸",
-      direct: "Tell me what you need to remember and when. Format: 'task at time'",
-      cheerful: "Hey there! 🎉 What awesome thing should I help you remember? Give me the details! ✨"
-    };
-    return { 
-      isTask: false, 
-      motivationalMessage: defaultResponses[personality] || defaultResponses.calm
-    };
-  }
-}
-
-// Enhanced timezone detection
-async function detectTimezone(userInput) {
-  const currentUTC = new Date().toISOString();
-  const systemMessage = `Current UTC time: ${currentUTC}
-
-User said: "${userInput}"
-
-Calculate their timezone offset from UTC. Be smart about parsing time formats and locations.
-
-Respond with JSON only:
-{
-  "timezoneOffset": number (hours from UTC, can be negative),
-  "timezone": "readable timezone name",
-  "confidence": "high/medium/low",
-  "confirmation": "friendly confirmation message asking them to verify"
+  "timeFound": true/false,
+  "timeExpression": "time if found",
+  "motivation": "short motivational phrase (max 4 words)",
+  "needsTime": true/false
 }
 
 Examples:
-- "It's 3:30 PM" → calculate offset based on UTC
-- "Istanbul" → +3 hours from UTC
-- "New York" → -5 hours (or -4 in daylight saving)`;
+- "gym at 7pm" → {"isReminder": true, "task": "gym", "timeFound": true, "timeExpression": "7pm", "motivation": "Stay strong! 💪", "needsTime": false}
+- "call mom" → {"isReminder": true, "task": "call mom", "timeFound": false, "motivation": "Family matters! 💕", "needsTime": true}
+- "vitamin morning" → {"isReminder": true, "task": "take vitamin", "timeFound": true, "timeExpression": "morning", "motivation": "Health first! 🌟", "needsTime": false}
+
+Be direct and precise.`;
 
   try {
-    const result = await askChatGPT(userInput, systemMessage);
-    return JSON.parse(result);
+    const result = await askChatGPT(messageText, systemMessage);
+    return result || { isReminder: false };
+  } catch (error) {
+    console.error('Error analyzing reminder:', error);
+    return { isReminder: false };
+  }
+}
+
+// Location timezone detection
+async function detectLocationTimezone(location) {
+  const systemMessage = `You are a timezone expert. Determine timezone offset from UTC for the given location.
+
+Location: "${location}"
+
+Respond with JSON only:
+{
+  "timezoneOffset": 3,
+  "location": "Istanbul, Turkey",
+  "confirmation": "Turkey timezone (GMT+3) set!"
+}
+
+Examples:
+- "Istanbul" → {"timezoneOffset": 3, "location": "Istanbul, Turkey", "confirmation": "Turkey timezone (GMT+3) set!"}
+- "New York" → {"timezoneOffset": -5, "location": "New York, USA", "confirmation": "Eastern timezone (GMT-5) set!"}
+- "London" → {"timezoneOffset": 0, "location": "London, UK", "confirmation": "GMT timezone set!"}`;
+
+  try {
+    const result = await askChatGPT(location, systemMessage);
+    return result;
   } catch (error) {
     console.error('Error detecting timezone:', error);
     return null;
   }
 }
 
-// Name extraction
-async function extractPreferredName(userInput) {
-  const systemMessage = `The user is telling me what they want to be called. Extract their preferred name.
-
-User said: "${userInput}"
-
-Respond with JSON only:
-{
-  "name": "extracted name",
-  "confidence": "high/medium/low",
-  "friendlyResponse": "warm response using their name"
-}
-
-Examples:
-- "Call me John" → name: "John"
-- "My name is Sarah" → name: "Sarah"  
-- "Everyone calls me Mike" → name: "Mike"
-- "Sarah" → name: "Sarah"`;
-
-  try {
-    const result = await askChatGPT(userInput, systemMessage);
-    return JSON.parse(result);
-  } catch (error) {
-    console.error('Error extracting name:', error);
-    return { name: userInput.trim(), friendlyResponse: `Nice to meet you, ${userInput.trim()}! 😊` };
+// Check for name change
+function isNameChange(messageText) {
+  const text = messageText.toLowerCase();
+  if ((text.includes('call me') || text.includes('name') || text.includes('i am') || text.includes("i'm")) && 
+      !text.includes('remind') && !text.includes('at ') && !text.includes('tomorrow')) {
+    
+    let newName = text;
+    if (text.includes('call me')) {
+      newName = text.split('call me')[1];
+    } else if (text.includes('my name is')) {
+      newName = text.split('my name is')[1];
+    } else if (text.includes('i am')) {
+      newName = text.split('i am')[1];
+    } else if (text.includes("i'm")) {
+      newName = text.split("i'm")[1];
+    }
+    
+    newName = newName.replace(/[^a-zA-Z\s]/g, '').trim();
+    
+    if (newName && newName.length > 0 && newName.length < 20) {
+      return newName;
+    }
   }
+  return null;
 }
 
 // Twilio WhatsApp function
 async function sendWhatsAppMessage(to, message) {
   try {
-    console.log(`Sending message to ${to}: ${message.substring(0, 50)}...`);
-    
     const authToken = Buffer.from(`${process.env.TWILIO_ACCOUNT_SID}:${process.env.TWILIO_AUTH_TOKEN}`).toString('base64');
     
     const response = await axios.post(
@@ -272,111 +265,53 @@ async function sendWhatsAppMessage(to, message) {
         timeout: 10000
       }
     );
-    console.log('Message sent successfully:', response.data?.sid || 'Unknown ID');
+    
+    console.log('✅ Message sent');
     return response.data;
   } catch (error) {
-    console.error('Error sending WhatsApp message:', {
-      status: error.response?.status,
-      statusText: error.response?.statusText,
-      data: error.response?.data,
-      message: error.message
-    });
+    console.error('❌ Send error:', error.message);
     throw error;
   }
 }
 
-// Context detection for emojis and encouragement
-function detectContext(messageText) {
-  const text = messageText.toLowerCase();
-  
-  const contexts = {
-    family: {
-      keywords: ['call mom', 'call dad', 'family', 'mother', 'father', 'sister', 'brother', 'mom', 'dad', 'parents'],
-      emoji: '💕',
-      encouragement: 'Family connections matter most! 💕',
-      reminder: '👨‍👩‍👧‍👦 Time to connect with your loved ones!'
-    },
-    meeting: {
-      keywords: ['meeting', 'conference', 'zoom', 'teams', 'call', 'appointment', 'interview'],
-      emoji: '🤝',
-      encouragement: 'You\'ve got this! 🤝',
-      reminder: '💼 Time for your meeting!'
-    },
-    health: {
-      keywords: ['doctor', 'dentist', 'clinic', 'hospital', 'medicine', 'medication', 'pills', 'checkup'],
-      emoji: '🏥',
-      encouragement: 'Your health is your wealth! 🏥',
-      reminder: '⚕️ Time to take care of yourself!'
-    },
-    workout: {
-      keywords: ['gym', 'workout', 'exercise', 'run', 'fitness', 'yoga', 'training', 'sport'],
-      emoji: '💪',
-      encouragement: 'Every workout counts! 💪',
-      reminder: '🔥 Time to get moving!'
-    },
-    work: {
-      keywords: ['deadline', 'project', 'task', 'work', 'email', 'report', 'presentation'],
-      emoji: '⚡',
-      encouragement: 'You\'re capable of amazing things! ⚡',
-      reminder: '🎯 Time to get things done!'
-    },
-    shopping: {
-      keywords: ['shopping', 'groceries', 'buy', 'store', 'market'],
-      emoji: '🛒',
-      encouragement: 'Smart planning ahead! 🛒',
-      reminder: '🛍️ Shopping time!'
-    }
-  };
-  
-  for (const [contextName, contextData] of Object.entries(contexts)) {
-    if (contextData.keywords.some(keyword => text.includes(keyword))) {
-      return contextData;
-    }
-  }
-  
-  return {
-    emoji: '⭐',
-    encouragement: 'I\'ll help you stay on track! ⭐',
-    reminder: '🔔 Here\'s your reminder!'
-  };
-}
-
-// Enhanced reminder parsing with better time handling
-async function parseReminderWithTimezone(messageText, user) {
+// Enhanced reminder parsing
+function parseReminderWithTimezone(messageText, task, timezoneOffset = 0) {
   try {
     let parsed = chrono.parseDate(messageText);
     
-    // If no specific time, try to detect relative time
-    if (!parsed && messageText.toLowerCase().includes('tomorrow')) {
-      // Default to 9 AM tomorrow if no time specified
-      const tomorrow = new Date();
-      tomorrow.setDate(tomorrow.getDate() + 1);
-      tomorrow.setHours(9, 0, 0, 0);
-      parsed = tomorrow;
+    // Smart defaults
+    if (!parsed) {
+      if (messageText.toLowerCase().includes('morning')) {
+        const morning = new Date();
+        morning.setHours(8, 0, 0, 0);
+        if (morning <= new Date()) {
+          morning.setDate(morning.getDate() + 1);
+        }
+        parsed = morning;
+      } else if (messageText.toLowerCase().includes('evening')) {
+        const evening = new Date();
+        evening.setHours(18, 0, 0, 0);
+        if (evening <= new Date()) {
+          evening.setDate(evening.getDate() + 1);
+        }
+        parsed = evening;
+      } else if (messageText.toLowerCase().includes('tomorrow')) {
+        const tomorrow = new Date();
+        tomorrow.setDate(tomorrow.getDate() + 1);
+        tomorrow.setHours(9, 0, 0, 0);
+        parsed = tomorrow;
+      }
     }
     
     if (!parsed) return null;
     
     // Convert to UTC for storage
-    const utcTime = new Date(parsed.getTime() - (user.timezoneOffset * 60 * 60 * 1000));
-    
-    // Extract task
-    const timeMatch = messageText.match(/\s+(at|on|in|tomorrow|today|next|tonight)\s+/i);
-    let reminderText = messageText;
-    
-    if (timeMatch) {
-      reminderText = messageText.substring(0, timeMatch.index).trim();
-    }
-    
-    reminderText = reminderText.replace(/^(remind me to|reminder to|remind|remember to)\s+/i, '');
-    
-    const context = detectContext(messageText);
+    const utcTime = new Date(parsed.getTime() - (timezoneOffset * 60 * 60 * 1000));
     
     return {
-      message: reminderText || 'Reminder',
+      message: task,
       scheduledTime: utcTime,
-      userLocalTime: parsed.toLocaleString(),
-      context: context
+      userLocalTime: parsed.toLocaleString()
     };
   } catch (error) {
     console.error('Error parsing reminder:', error);
@@ -390,19 +325,12 @@ app.get('/webhook', (req, res) => {
   const token = req.query['hub.verify_token'];
   const challenge = req.query['hub.challenge'];
 
-  console.log('Webhook verification attempt:', { mode, token: token ? 'provided' : 'missing' });
-
-  if (mode && token) {
-    if (mode === 'subscribe' && token === process.env.VERIFY_TOKEN) {
-      console.log('Webhook verified successfully');
-      res.status(200).send(challenge);
-    } else {
-      console.error('Webhook verification failed - token mismatch');
-      res.sendStatus(403);
-    }
+  if (mode && token && mode === 'subscribe' && token === process.env.VERIFY_TOKEN) {
+    console.log('✅ Webhook verified');
+    res.status(200).send(challenge);
   } else {
-    console.error('Webhook verification failed - missing parameters');
-    res.sendStatus(400);
+    console.error('❌ Webhook verification failed');
+    res.sendStatus(403);
   }
 });
 
@@ -410,7 +338,6 @@ app.get('/webhook', (req, res) => {
 app.post('/webhook', async (req, res) => {
   try {
     const body = req.body;
-    console.log('Received Twilio webhook:', JSON.stringify(body, null, 2));
 
     if (body.From && body.Body) {
       const phoneNumber = body.From.replace('whatsapp:', '');
@@ -436,14 +363,14 @@ app.post('/webhook', async (req, res) => {
   }
 });
 
-// Enhanced message handling with personalized onboarding
+// MAIN message handler - NO multiple responses
 async function handleIncomingMessage(message, contact) {
   try {
     const userId = message.from;
     const userName = contact?.profile?.name || 'User';
     const messageText = message.text.body;
 
-    console.log(`Processing message from ${userName} (${userId}): ${messageText}`);
+    console.log(`📨 ${userName}: ${messageText}`);
 
     // Find or create user
     let user = await User.findOne({ userId });
@@ -451,78 +378,71 @@ async function handleIncomingMessage(message, contact) {
       user = new User({
         userId,
         userName,
-        setupStage: 'welcome'
+        isSetup: false
       });
       await user.save();
     }
 
-    // Handle onboarding stages
-    if (user.setupStage === 'welcome') {
-      await sendWhatsAppMessage(userId, `🌟 Hello there! Welcome to your personal AI reminder assistant! 🤖✨\n\nI'm excited to help you stay organized and never miss what matters most to you! 💝\n\n👋 What would you like me to call you? (Your name or nickname)`);
-      user.setupStage = 'name';
-      await user.save();
+    // Check usage limits
+    const usageCheck = await checkUsageLimits(user);
+    if (!usageCheck.withinLimit) {
+      await sendWhatsAppMessage(userId, `🚫 Daily limit reached (${USAGE_LIMITS.FREE_TIER_MESSAGES} messages).\n\n⭐ Upgrade for unlimited reminders!`);
       return;
     }
 
-    if (user.setupStage === 'name') {
-      const nameInfo = await extractPreferredName(messageText);
-      user.preferredName = nameInfo.name;
-      user.setupStage = 'personality';
-      await user.save();
-      
-      await sendWhatsAppMessage(userId, `${nameInfo.friendlyResponse}\n\n🎭 What style would you like for your assistant?\n\n1️⃣ **Calm and supportive** - Gentle and understanding\n2️⃣ **Direct and to the point** - Efficient and focused  \n3️⃣ **Cheerful and funny** - Energetic with humor\n\nJust reply with 1, 2, or 3! ✨`);
-      return;
-    }
+    // Increment message count
+    user.messageCount += 1;
+    await user.save();
 
-    if (user.setupStage === 'personality') {
-      let selectedPersonality = 'calm'; // default
-      const choice = messageText.trim();
-      
-      if (choice === '1' || messageText.toLowerCase().includes('calm') || messageText.toLowerCase().includes('supportive')) {
-        selectedPersonality = 'calm';
-      } else if (choice === '2' || messageText.toLowerCase().includes('direct') || messageText.toLowerCase().includes('point')) {
-        selectedPersonality = 'direct';
-      } else if (choice === '3' || messageText.toLowerCase().includes('cheerful') || messageText.toLowerCase().includes('funny')) {
-        selectedPersonality = 'cheerful';
+    // Setup flow
+    if (!user.isSetup) {
+      if (!user.preferredName) {
+        // Welcome + name
+        await sendWhatsAppMessage(userId, `🤖 Hi! I'm Jarvis, your reminder assistant.\n\n📋 I help you remember things with SPECIFIC times:\n\n✅ "gym at 7pm today"\n✅ "call mom at 3pm tomorrow"\n❌ "gym tonight" (too vague)\n❌ "call mom tomorrow" (no time)\n\nWhat should I call you?`);
+        
+        // Try to extract name from current message
+        const cleanName = messageText.replace(/[^a-zA-Z\s]/g, '').trim();
+        if (cleanName && cleanName.length > 0 && cleanName.length < 20) {
+          user.preferredName = cleanName;
+          await user.save();
+          await sendWhatsAppMessage(userId, `Got it, ${cleanName}!\n\nWhat's your location? (e.g., "Istanbul", "New York")\n\nThis helps me set accurate reminder times.`);
+        }
+        return;
       }
       
-      user.personality = selectedPersonality;
-      user.setupStage = 'timezone';
-      await user.save();
-      
-      const personalityResponses = {
-        calm: `Perfect choice, ${user.preferredName} 🌸 I'll be your calm and supportive companion.`,
-        direct: `Got it, ${user.preferredName}. I'll keep things efficient and focused.`,
-        cheerful: `Awesome choice, ${user.preferredName}! 🎉 This is going to be so much fun! ✨`
-      };
-      
-      await sendWhatsAppMessage(userId, `${personalityResponses[selectedPersonality]}\n\n⏰ Now, what time is it where you are right now?\n\nJust tell me like "It's 3:30 PM" or your city like "Istanbul" 🌍`);
-      return;
-    }
-
-    if (user.setupStage === 'timezone') {
-      const timezoneInfo = await detectTimezone(messageText);
-      if (timezoneInfo && timezoneInfo.confidence !== 'low') {
-        user.timezoneOffset = timezoneInfo.timezoneOffset;
-        user.timezone = timezoneInfo.timezone;
-        user.setupStage = 'complete';
-        await user.save();
-        
-        const personalityWelcomes = {
-          calm: `${timezoneInfo.confirmation}\n\n🌸 Perfect! You're all set, ${user.preferredName}. I'm here to gently help you remember what matters.\n\nJust tell me naturally:\n• "vitamin morning"\n• "call mom at 6pm"\n• "water plants weekly"\n• "meds every day 9am"\n\nI understand you perfectly 💚`,
-          direct: `${timezoneInfo.confirmation}\n\nSetup complete, ${user.preferredName}.\n\nCommands:\n• "task at time" - sets reminder\n• "task daily/weekly" - recurring\n• "list" - shows reminders\n\nReady.`,
-          cheerful: `${timezoneInfo.confirmation}\n\n🎊 Woohoo! We're all set, ${user.preferredName}! This is so exciting! 🎉\n\nNow I can help you remember everything! Try these:\n• "gym tonight" 💪\n• "vitamin morning" 💊\n• "coffee with friends weekly" ☕\n\nLet's make your life amazing! ✨`
-        };
-        
-        await sendWhatsAppMessage(userId, personalityWelcomes[user.personality] || personalityWelcomes.calm);
-      } else {
-        await sendWhatsAppMessage(userId, `I'm having trouble understanding your timezone, ${user.preferredName} 😅\n\nCould you try telling me:\n• Current time: "It's 2:30 PM"\n• Or your city: "London" or "Tokyo"\n\nThis helps me set perfect reminders for you! ⏰`);
+      if (!user.location) {
+        // Location setup
+        const timezoneInfo = await detectLocationTimezone(messageText);
+        if (timezoneInfo) {
+          user.location = timezoneInfo.location;
+          user.timezoneOffset = timezoneInfo.timezoneOffset;
+          user.isSetup = true;
+          await user.save();
+          
+          await sendWhatsAppMessage(userId, `${timezoneInfo.confirmation}\n\n✅ Setup complete, ${user.preferredName}!\n\n📋 How to set reminders:\n• "gym at 7pm today"\n• "call mom at 3pm tomorrow"\n• "meeting Monday at 2pm"\n\n⚠️ Always include specific day and time\n\nCommands: "list reminders", "change name to X"\n\nReady! 🎯`);
+        } else {
+          await sendWhatsAppMessage(userId, `Please specify your location clearly:\n\n• "Istanbul"\n• "New York"\n• "London"\n\nThis helps me set accurate times.`);
+        }
+        return;
       }
-      return;
     }
 
-    // Handle commands for completed setup
-    if (messageText.toLowerCase().includes('list') || messageText.toLowerCase().includes('my reminders')) {
+    // Handle commands for setup users
+    
+    // Name change check
+    const nameChange = isNameChange(messageText);
+    if (nameChange) {
+      user.preferredName = nameChange;
+      await user.save();
+      await sendWhatsAppMessage(userId, `✅ Updated! I'll call you ${nameChange}.`);
+      return;
+    }
+    
+    // List reminders
+    if (messageText.toLowerCase().includes('list') || 
+        messageText.toLowerCase().includes('show') || 
+        messageText.toLowerCase().includes('my reminders')) {
+      
       const reminders = await Reminder.find({ 
         userId: userId, 
         isCompleted: false,
@@ -530,31 +450,24 @@ async function handleIncomingMessage(message, contact) {
       }).sort({ scheduledTime: 1 });
       
       if (reminders.length > 0) {
-        let response = `📋 Your upcoming reminders, ${user.preferredName}:\n\n`;
+        let response = `📋 Your reminders, ${user.preferredName}:\n\n`;
         reminders.forEach((reminder, index) => {
-          const context = detectContext(reminder.message);
-          response += `${index + 1}. ${reminder.message} ${context.emoji}\n   📅 ${reminder.userLocalTime}\n\n`;
+          response += `${index + 1}. ${reminder.message}\n   📅 ${reminder.userLocalTime}\n\n`;
         });
         await sendWhatsAppMessage(userId, response);
       } else {
-        await sendWhatsAppMessage(userId, `📋 No upcoming reminders, ${user.preferredName}!\n\n💡 Try telling me:\n• "gym tonight"\n• "call mom at 6pm"\n• "shopping tomorrow"`);
+        await sendWhatsAppMessage(userId, `📋 No reminders set, ${user.preferredName}.\n\nTry: "gym at 7pm"`);
       }
       return;
     }
-
-    // Smart message analysis
-    const analysis = await analyzeMessage(messageText, user.preferredName, user.personality);
     
-    if (analysis.isTask) {
-      if (analysis.isRecurring) {
-        // Handle recurring tasks
-        await sendWhatsAppMessage(userId, `📅 I see you want to set up a recurring reminder!\n\n"${analysis.task}" - ${analysis.recurrencePattern}\n\n⚠️ Note: Currently I can set single reminders. For recurring tasks, I can remind you to set it up again each time! 🔄\n\nShould I create a one-time reminder for "${analysis.task}" now?`);
-        return;
-      }
-      
-      if (analysis.hasTime && !analysis.needsTimeConfirmation) {
-        // Clear time given - create reminder
-        const reminderData = await parseReminderWithTimezone(messageText, user);
+    // Reminder analysis
+    const analysis = await analyzeReminder(messageText, user.preferredName);
+    
+    if (analysis && analysis.isReminder) {
+      if (analysis.timeFound && !analysis.needsTime) {
+        // Complete reminder with time
+        const reminderData = parseReminderWithTimezone(messageText, analysis.task, user.timezoneOffset);
         
         if (reminderData && reminderData.scheduledTime > new Date()) {
           const reminder = new Reminder({
@@ -567,35 +480,29 @@ async function handleIncomingMessage(message, contact) {
           
           await reminder.save();
           
-          const context = reminderData.context;
-          const personalityConfirmations = {
-            calm: `✅ ${analysis.motivationalMessage}\n\n🌸 Peaceful reminder set for ${reminderData.userLocalTime}:\n"${reminderData.message}" ${context.emoji}\n\nI'll gently remind you, ${user.preferredName} 💚`,
-            direct: `✅ Reminder set: ${reminderData.userLocalTime}\n"${reminderData.message}" ${context.emoji}\n\nDone, ${user.preferredName}.`,
-            cheerful: `✅ ${analysis.motivationalMessage}\n\n🎉 AWESOME! Reminder set for ${reminderData.userLocalTime}:\n"${reminderData.message}" ${context.emoji}\n\nI'm so excited to help you, ${user.preferredName}! 🌟`
-          };
-          
-          await sendWhatsAppMessage(userId, personalityConfirmations[user.personality] || personalityConfirmations.calm);
+          await sendWhatsAppMessage(userId, `✅ ${analysis.motivation}\n\nReminder: "${reminderData.message}"\n📅 ${reminderData.userLocalTime}\n\nConfirmed, ${user.preferredName}! 🎯`);
         } else {
-          await sendWhatsAppMessage(userId, `⚠️ I think that time has already passed, ${user.preferredName}!\n\n💡 Try: "${analysis.task} tomorrow at 9am" or "${analysis.task} at 6pm"`);
+          await sendWhatsAppMessage(userId, `⚠️ That time has passed, ${user.preferredName}.\n\nTry: "${analysis.task} tomorrow at 9am"`);
         }
       } else {
-        // Task detected but needs time clarification
-        const suggestion = analysis.suggestedTime ? `\n\n💡 Suggestion: "${analysis.task} ${analysis.suggestedTime}"` : '';
-        await sendWhatsAppMessage(userId, `${analysis.clarificationQuestion || `Great! I see you want to remember "${analysis.task}" 📝\n\nWhen should I remind you?`}${suggestion}\n\nJust tell me like "at 7pm" or "tomorrow morning" ⏰`);
+        // Needs time confirmation
+        await sendWhatsAppMessage(userId, `📝 Task: "${analysis.task}"\n\n⚠️ Please specify exact day and time:\n\n• "at 7pm today"\n• "at 3pm tomorrow"\n• "Monday at 2pm"\n\nBe specific to avoid confusion.`);
       }
-    } else {
-      // Not a task - general conversation
-      const friendlyResponse = analysis.motivationalMessage || 
-        `Hey ${user.preferredName}! 👋 I'm here to help you remember important things!\n\n💭 Just tell me naturally:\n• "gym at 7pm"\n• "call mom tomorrow" \n• "meeting at 2"\n• "buy groceries"\n\nWhat would you like to remember? ✨`;
-      
-      await sendWhatsAppMessage(userId, friendlyResponse);
+      return;
     }
+    
+    // General help
+    const remainingMsgs = usageCheck.remainingMessages;
+    let warningText = remainingMsgs <= 10 ? `\n\n⚠️ ${remainingMsgs} messages left today` : '';
+    
+    await sendWhatsAppMessage(userId, `Hi ${user.preferredName}! 🤖\n\n📋 Set reminders with specific times:\n\n• "gym at 7pm today"\n• "call mom at 3pm tomorrow"\n• "meeting Monday at 2pm"\n\n⚠️ Always include day and exact time\n\nCommands: "list reminders"${warningText}`);
+    
   } catch (error) {
-    console.error('Error handling message:', error);
+    console.error('❌ Handler error:', error);
     try {
-      await sendWhatsAppMessage(message.from, '❌ Sorry, something went wrong. Please try again! 🤖');
+      await sendWhatsAppMessage(message.from, '❌ Something went wrong. Please try again.');
     } catch (sendError) {
-      console.error('Error sending error message:', sendError);
+      console.error('❌ Send error:', sendError);
     }
   }
 }
@@ -609,37 +516,36 @@ cron.schedule('* * * * *', async () => {
       isCompleted: false
     });
 
-    console.log(`Checking reminders at ${now.toISOString()}: ${dueReminders.length} due reminders found`);
+    console.log(`⏰ Checking reminders: ${dueReminders.length} due`);
 
     for (const reminder of dueReminders) {
       try {
         const user = await User.findOne({ userId: reminder.userId });
         const preferredName = user?.preferredName || 'there';
         
-        const context = detectContext(reminder.message);
         await sendWhatsAppMessage(
           reminder.userId,
-          `${context.reminder}\n\n"${reminder.message}"\n\n💝 Hope this helps, ${preferredName}! From your AI assistant ✨`
+          `🔔 REMINDER\n\n"${reminder.message}"\n\nTime to act, ${preferredName}! 💪`
         );
         
         reminder.isCompleted = true;
         await reminder.save();
         
-        console.log(`Personalized reminder sent to ${preferredName}: ${reminder.message}`);
+        console.log(`✅ Reminded ${preferredName}: ${reminder.message}`);
       } catch (error) {
-        console.error(`Error sending reminder to ${reminder.userName}:`, error);
+        console.error(`❌ Reminder error:`, error);
       }
     }
   } catch (error) {
-    console.error('Error checking reminders:', error);
+    console.error('❌ Cron error:', error);
   }
 });
 
 // Health check
 app.get('/', (req, res) => {
   res.json({ 
-    status: '🌟 Smart Personal AI Reminder Assistant!',
-    message: 'Ready to understand natural language and create personalized reminders',
+    status: '🤖 Jarvis - Smart Reminder Assistant',
+    message: 'Direct, efficient, AI-powered reminders',
     timestamp: new Date().toISOString(),
     environment: process.env.NODE_ENV || 'development',
     uptime: process.uptime(),
@@ -647,14 +553,13 @@ app.get('/', (req, res) => {
     twilio_status: process.env.TWILIO_ACCOUNT_SID ? 'configured' : 'not configured',
     openai_status: process.env.OPENAI_API_KEY ? 'configured' : 'not configured',
     features: [
-      '🌟 Warm personalized welcome experience',
-      '👋 Custom name preferences',
-      '🌍 Smart timezone detection',
-      '🤖 Advanced natural language understanding',
-      '💬 Conversational reminder creation',
-      '⏰ Smart time suggestions and clarifications',
-      '💝 Emotional intelligence and motivation',
-      '📋 Personalized reminder management'
+      '🤖 AI-powered conversation understanding',
+      '📍 Location-based timezone setup',
+      '✅ Smart reminder confirmation',
+      '💪 Contextual motivational messages',
+      '📋 Reminder management',
+      '🎯 Direct, efficient responses',
+      '🚫 Usage limits with upgrade prompts'
     ]
   });
 });
@@ -668,7 +573,7 @@ app.use((error, req, res, next) => {
 // Start server
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Server running on port ${PORT}`);
-  console.log('🌟 Smart Personal AI Reminder Assistant is ready!');
+  console.log('🤖 Jarvis Smart Reminder Assistant is ready!');
 });
 
 // Graceful shutdown
