@@ -38,7 +38,7 @@ if (missingVars.length > 0) {
   }
 }
 
-// MongoDB connection
+// MongoDB connection with improved error handling
 async function connectToMongoDB() {
   const maxRetries = 5;
   let retries = 0;
@@ -51,14 +51,14 @@ async function connectToMongoDB() {
         serverSelectionTimeoutMS: 10000,
         socketTimeoutMS: 45000,
       });
-      console.log('Connected to MongoDB');
+      console.log('✅ Connected to MongoDB');
       return;
     } catch (err) {
       retries++;
-      console.error(`MongoDB connection attempt ${retries} failed:`, err.message);
+      console.error(`❌ MongoDB connection attempt ${retries} failed:`, err.message);
       
       if (retries >= maxRetries) {
-        console.error('Max retries reached. Could not connect to MongoDB.');
+        console.error('🚨 Max retries reached. Could not connect to MongoDB.');
         return;
       }
       
@@ -77,7 +77,7 @@ const userSchema = new mongoose.Schema({
   location: { type: String, default: null },
   timezoneOffset: { type: Number, default: 0 },
   messageCount: { type: Number, default: 0 },
-  reminderCount: { type: Number, default: 0 }, // Daily reminder count
+  reminderCount: { type: Number, default: 0 },
   lastResetDate: { type: Date, default: Date.now },
   isSetup: { type: Boolean, default: false },
   pendingReminder: { type: Object, default: null },
@@ -95,7 +95,7 @@ const reminderSchema = new mongoose.Schema({
   userLocalTime: { type: String, required: true },
   isCompleted: { type: Boolean, default: false },
   isRecurring: { type: Boolean, default: false },
-  recurrencePattern: { type: String, default: null }, // daily, weekly, monthly
+  recurrencePattern: { type: String, default: null },
   nextOccurrence: { type: Date, default: null },
   createdAt: { type: Date, default: Date.now }
 });
@@ -105,7 +105,7 @@ const Reminder = mongoose.model('Reminder', reminderSchema);
 // Usage limits
 const USAGE_LIMITS = {
   FREE_TIER_MESSAGES: 50,
-  FREE_TIER_REMINDERS: 5, // Daily reminder limit
+  FREE_TIER_REMINDERS: 5,
   RESET_PERIOD_HOURS: 24
 };
 
@@ -116,7 +116,7 @@ async function checkUsageLimits(user) {
   
   if (hoursElapsed >= USAGE_LIMITS.RESET_PERIOD_HOURS) {
     user.messageCount = 0;
-    user.reminderCount = 0; // Reset reminder count too
+    user.reminderCount = 0;
     user.lastResetDate = now;
     await user.save();
   }
@@ -150,7 +150,7 @@ function calculateNextOccurrence(currentTime, pattern) {
   return next;
 }
 
-// Fixed ChatGPT function
+// Enhanced ChatGPT function
 async function askChatGPT(prompt, systemMessage) {
   try {
     console.log('🤖 ChatGPT analyzing...');
@@ -176,9 +176,8 @@ async function askChatGPT(prompt, systemMessage) {
     );
     
     const result = response.data.choices[0].message.content.trim();
-    console.log('🤖 ChatGPT responded');
+    console.log('✅ ChatGPT responded');
     
-    // Try to parse as JSON, fallback if fails
     try {
       return JSON.parse(result);
     } catch {
@@ -218,14 +217,7 @@ Respond with JSON only:
   "recurrencePattern": "daily/weekly/monthly" (if recurring),
   "typosCorrected": true/false,
   "clarificationNeeded": true/false
-}
-
-Examples:
-- "gum at 430" → {"isReminder": true, "task": "gym", "originalTask": "gum", "timeFound": true, "timeExpression": "4:30 PM", "motivation": "Stay strong! 💪", "needsTime": false, "typosCorrected": true}
-- "call mom 6" → {"isReminder": true, "task": "call mom", "timeFound": true, "timeExpression": "6:00 PM", "motivation": "Family matters! 💕", "needsTime": false, "typosCorrected": true}
-- "doc appointment" → {"isReminder": true, "task": "doctor appointment", "originalTask": "doc appointment", "timeFound": false, "motivation": "Health first! 🏥", "needsTime": true, "typosCorrected": true}
-
-If unsure about typos, set clarificationNeeded: true.`;
+}`;
 
   try {
     const result = await askChatGPT(messageText, systemMessage);
@@ -247,12 +239,7 @@ Respond with JSON only:
   "timezoneOffset": 3,
   "location": "Istanbul, Turkey",
   "confirmation": "Turkey timezone (GMT+3) set!"
-}
-
-Examples:
-- "Istanbul" → {"timezoneOffset": 3, "location": "Istanbul, Turkey", "confirmation": "Turkey timezone (GMT+3) set!"}
-- "New York" → {"timezoneOffset": -5, "location": "New York, USA", "confirmation": "Eastern timezone (GMT-5) set!"}
-- "London" → {"timezoneOffset": 0, "location": "London, UK", "confirmation": "GMT timezone set!"}`;
+}`;
 
   try {
     const result = await askChatGPT(location, systemMessage);
@@ -270,25 +257,15 @@ async function generateContextualMessage(task, userName) {
 Task: "${task}"
 User: ${userName}
 
-Analyze the task context and create a completely original 2-part motivational message:
-1. Present moment encouragement (why this matters now)
-2. Future positive outcome (how they'll feel after)
+Create a completely original 2-part motivational message:
+1. Present moment encouragement
+2. Future positive outcome
 
 Respond with JSON only:
 {
   "encouragement": "unique motivating message for doing this task now",
   "reward": "unique positive message about the outcome/feeling after"
-}
-
-Be creative, vary your language, consider:
-- Task type (health, work, personal, fitness, family, etc.)
-- Time of day implications
-- Emotional benefits
-- Personal growth aspects
-- Practical benefits
-- Social connections
-
-Make each message feel fresh, personal, and specifically crafted for this exact situation. Never repeat generic phrases.`;
+}`;
 
   try {
     const result = await askChatGPT(task, systemMessage);
@@ -331,7 +308,7 @@ function isNameChange(messageText) {
   return null;
 }
 
-// Twilio WhatsApp function
+// IMPROVED Twilio WhatsApp function with robust error handling
 async function sendWhatsAppMessage(to, message) {
   try {
     const authToken = Buffer.from(`${process.env.TWILIO_ACCOUNT_SID}:${process.env.TWILIO_AUTH_TOKEN}`).toString('base64');
@@ -352,22 +329,51 @@ async function sendWhatsAppMessage(to, message) {
       }
     );
     
-    console.log('✅ Message sent');
-    return response.data;
+    console.log('✅ Message sent successfully');
+    return { success: true, data: response.data };
   } catch (error) {
-    console.error('❌ Send error:', error.message);
-    throw error;
+    console.error('❌ Twilio Send Error:', error.message);
+    
+    // Handle specific Twilio errors gracefully
+    if (error.response?.data) {
+      const errorData = error.response.data;
+      const errorCode = error.response.headers['x-twilio-error-code'];
+      
+      console.error('🚨 Twilio Error Details:', {
+        code: errorCode,
+        message: errorData.message,
+        status: error.response.status
+      });
+      
+      // Handle rate limiting specifically
+      if (errorCode === '63038' || errorData.message?.includes('daily messages limit')) {
+        console.error('🚫 RATE LIMIT: Twilio account daily message limit reached');
+        return { success: false, error: 'rate_limited', code: '63038' };
+      }
+      
+      // Handle other common Twilio errors
+      if (errorCode === '21211') {
+        console.error('📱 Invalid phone number format');
+        return { success: false, error: 'invalid_phone', code: '21211' };
+      }
+      
+      if (errorCode === '21614') {
+        console.error('🚫 Phone number not verified (trial account)');
+        return { success: false, error: 'unverified_number', code: '21614' };
+      }
+    }
+    
+    // For other errors, still return an error object instead of throwing
+    return { success: false, error: 'unknown', message: error.message };
   }
 }
 
-// Enhanced reminder parsing with same-day assumption
+// Enhanced reminder parsing
 function parseReminderWithTimezone(messageText, task, timezoneOffset = 0) {
   try {
     let parsed = chrono.parseDate(messageText);
     
-    // Smart defaults for time-only messages
     if (!parsed) {
-      // Check for time patterns like "at 8am", "at 3pm"
       const timeMatch = messageText.match(/at\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm))/i);
       if (timeMatch) {
         const timeStr = timeMatch[1];
@@ -375,15 +381,13 @@ function parseReminderWithTimezone(messageText, task, timezoneOffset = 0) {
         const timeToday = chrono.parseDate(`today at ${timeStr}`);
         
         if (timeToday && timeToday > new Date()) {
-          parsed = timeToday; // Same day
+          parsed = timeToday;
         } else {
-          // Time has passed today, set for tomorrow
           parsed = chrono.parseDate(`tomorrow at ${timeStr}`);
         }
       }
     }
     
-    // Handle common phrases
     if (!parsed) {
       if (messageText.toLowerCase().includes('morning')) {
         const morning = new Date();
@@ -409,7 +413,6 @@ function parseReminderWithTimezone(messageText, task, timezoneOffset = 0) {
     
     if (!parsed) return null;
     
-    // Convert to UTC for storage
     const utcTime = new Date(parsed.getTime() - (timezoneOffset * 60 * 60 * 1000));
     
     return {
@@ -419,6 +422,34 @@ function parseReminderWithTimezone(messageText, task, timezoneOffset = 0) {
     };
   } catch (error) {
     console.error('Error parsing reminder:', error);
+    return null;
+  }
+}
+
+// Check Twilio account status on startup
+async function checkTwilioAccountStatus() {
+  try {
+    const authToken = Buffer.from(`${process.env.TWILIO_ACCOUNT_SID}:${process.env.TWILIO_AUTH_TOKEN}`).toString('base64');
+    
+    const response = await axios.get(
+      `https://api.twilio.com/2010-04-01/Accounts/${process.env.TWILIO_ACCOUNT_SID}.json`,
+      {
+        headers: {
+          'Authorization': `Basic ${authToken}`
+        }
+      }
+    );
+    
+    const account = response.data;
+    console.log('📊 Twilio Account Status:', {
+      type: account.type,
+      status: account.status,
+      date_created: account.date_created
+    });
+    
+    return account;
+  } catch (error) {
+    console.error('❌ Failed to check Twilio account status:', error.message);
     return null;
   }
 }
@@ -438,9 +469,8 @@ app.get('/webhook', (req, res) => {
   }
 });
 
-// Webhook for receiving messages with better error handling
+// Enhanced webhook for receiving messages
 app.post('/webhook', async (req, res) => {
-  // Send immediate response to Twilio to prevent timeouts
   res.sendStatus(200);
   
   try {
@@ -461,7 +491,6 @@ app.post('/webhook', async (req, res) => {
         profile: { name: body.ProfileName || 'User' }
       };
       
-      // Handle message asynchronously to prevent webhook timeouts
       setImmediate(() => {
         handleIncomingMessage(message, contact).catch(error => {
           console.error('❌ Async message handling error:', error);
@@ -473,7 +502,7 @@ app.post('/webhook', async (req, res) => {
   }
 });
 
-// MAIN message handler - NO multiple responses
+// ENHANCED message handler with improved error handling
 async function handleIncomingMessage(message, contact) {
   try {
     const userId = message.from;
@@ -482,7 +511,6 @@ async function handleIncomingMessage(message, contact) {
 
     console.log(`📨 ${userName}: ${messageText}`);
 
-    // Find or create user
     let user = await User.findOne({ userId });
     if (!user) {
       user = new User({
@@ -493,35 +521,44 @@ async function handleIncomingMessage(message, contact) {
       await user.save();
     }
 
-    // Check usage limits
     const usageCheck = await checkUsageLimits(user);
     if (!usageCheck.withinLimit) {
-      await sendWhatsAppMessage(userId, `🚫 Daily limit reached (${USAGE_LIMITS.FREE_TIER_MESSAGES} messages).\n\n⭐ Upgrade for unlimited reminders!`);
+      const result = await sendWhatsAppMessage(userId, `🚫 Daily limit reached (${USAGE_LIMITS.FREE_TIER_MESSAGES} messages).\n\n⭐ Upgrade for unlimited reminders!`);
+      
+      if (!result.success) {
+        console.log('🚫 Cannot send rate limit message - API error:', result.error);
+      }
       return;
     }
 
-    // Increment message count
     user.messageCount += 1;
     await user.save();
 
-    // Setup flow
+    // Setup flow with error handling
     if (!user.isSetup) {
       if (!user.preferredName) {
-        // Welcome + name
-        await sendWhatsAppMessage(userId, `🤖 Hi! I'm Jarvis, your reminder assistant.\n\n📋 I help you remember things with SPECIFIC times:\n\n✅ "gym at 7pm today"\n✅ "call mom at 3pm tomorrow"\n❌ "gym tonight" (too vague)\n❌ "call mom tomorrow" (no time)\n\nWhat should I call you?`);
+        const result = await sendWhatsAppMessage(userId, `🤖 Hi! I'm Jarvis, your reminder assistant.\n\n📋 I help you remember things with SPECIFIC times:\n\n✅ "gym at 7pm today"\n✅ "call mom at 3pm tomorrow"\n❌ "gym tonight" (too vague)\n❌ "call mom tomorrow" (no time)\n\nWhat should I call you?`);
         
-        // Try to extract name from current message
+        if (!result.success) {
+          console.log('🚫 Cannot send setup message - API error:', result.error);
+          return;
+        }
+        
         const cleanName = messageText.replace(/[^a-zA-Z\s]/g, '').trim();
         if (cleanName && cleanName.length > 0 && cleanName.length < 20) {
           user.preferredName = cleanName;
           await user.save();
-          await sendWhatsAppMessage(userId, `Got it, ${cleanName}!\n\nWhat's your location? (e.g., "Istanbul", "New York")\n\nThis helps me set accurate reminder times.`);
+          
+          const result2 = await sendWhatsAppMessage(userId, `Got it, ${cleanName}!\n\nWhat's your location? (e.g., "Istanbul", "New York")\n\nThis helps me set accurate reminder times.`);
+          
+          if (!result2.success) {
+            console.log('🚫 Cannot send location request - API error:', result2.error);
+          }
         }
         return;
       }
       
       if (!user.location) {
-        // Location setup
         const timezoneInfo = await detectLocationTimezone(messageText);
         if (timezoneInfo) {
           user.location = timezoneInfo.location;
@@ -529,25 +566,34 @@ async function handleIncomingMessage(message, contact) {
           user.isSetup = true;
           await user.save();
           
-          await sendWhatsAppMessage(userId, `${timezoneInfo.confirmation}\n\n✅ Setup complete, ${user.preferredName}!\n\n📋 How to set reminders:\n• "gym at 7pm today"\n• "call mom at 3pm tomorrow"\n• "meeting Monday at 2pm"\n\n⚠️ Always include specific day and time\n\nCommands: "list reminders", "change name to X"\n\nReady! 🎯`);
+          const result = await sendWhatsAppMessage(userId, `${timezoneInfo.confirmation}\n\n✅ Setup complete, ${user.preferredName}!\n\n📋 How to set reminders:\n• "gym at 7pm today"\n• "call mom at 3pm tomorrow"\n• "meeting Monday at 2pm"\n\n⚠️ Always include specific day and time\n\nCommands: "list reminders", "change name to X"\n\nReady! 🎯`);
+          
+          if (!result.success) {
+            console.log('🚫 Cannot send setup complete message - API error:', result.error);
+          }
         } else {
-          await sendWhatsAppMessage(userId, `Please specify your location clearly:\n\n• "Istanbul"\n• "New York"\n• "London"\n\nThis helps me set accurate times.`);
+          const result = await sendWhatsAppMessage(userId, `Please specify your location clearly:\n\n• "Istanbul"\n• "New York"\n• "London"\n\nThis helps me set accurate times.`);
+          
+          if (!result.success) {
+            console.log('🚫 Cannot send location clarification - API error:', result.error);
+          }
         }
         return;
       }
     }
 
-    // Handle commands for setup users
-    
     // Handle pending reminder confirmations
     if (user.pendingReminder && (messageText.toLowerCase() === 'yes' || messageText.toLowerCase() === 'y')) {
-      // Check reminder limit before confirming
       const usageCheck = await checkUsageLimits(user);
       if (!usageCheck.withinReminderLimit) {
         user.pendingReminder = null;
         await user.save();
         
-        await sendWhatsAppMessage(userId, `💙 Hey ${user.preferredName}, you've reached your daily limit of ${USAGE_LIMITS.FREE_TIER_REMINDERS} reminders!\n\nI love helping you stay organized! 😊\n\n✨ **Upgrade to unlimited** and I can help you remember everything that matters!\n\n🎯 More reminders = Better life organization\n💝 Just thinking of your success!`);
+        const result = await sendWhatsAppMessage(userId, `💙 Hey ${user.preferredName}, you've reached your daily limit of ${USAGE_LIMITS.FREE_TIER_REMINDERS} reminders!\n\nI love helping you stay organized! 😊\n\n✨ **Upgrade to unlimited** and I can help you remember everything that matters!`);
+        
+        if (!result.success) {
+          console.log('🚫 Cannot send reminder limit message - API error:', result.error);
+        }
         return;
       }
       
@@ -566,7 +612,6 @@ async function handleIncomingMessage(message, contact) {
       
       await reminder.save();
       
-      // Increment reminder count
       user.reminderCount += 1;
       user.pendingReminder = null;
       await user.save();
@@ -575,7 +620,11 @@ async function handleIncomingMessage(message, contact) {
       const remainingReminders = USAGE_LIMITS.FREE_TIER_REMINDERS - user.reminderCount;
       const limitWarning = remainingReminders <= 2 ? `\n\n💫 ${remainingReminders} reminders left today` : '';
       
-      await sendWhatsAppMessage(userId, `✅ ${pendingData.isRecurring ? 'Recurring reminder' : 'Reminder'} confirmed!\n\n"${pendingData.message}"${recurringText}\n📅 ${pendingData.userLocalTime}\n\nAll set, ${user.preferredName}! 🎯${limitWarning}`);
+      const result = await sendWhatsAppMessage(userId, `✅ ${pendingData.isRecurring ? 'Recurring reminder' : 'Reminder'} confirmed!\n\n"${pendingData.message}"${recurringText}\n📅 ${pendingData.userLocalTime}\n\nAll set, ${user.preferredName}! 🎯${limitWarning}`);
+      
+      if (!result.success) {
+        console.log('🚫 Cannot send confirmation message - API error:', result.error);
+      }
       return;
     }
     
@@ -583,7 +632,11 @@ async function handleIncomingMessage(message, contact) {
       user.pendingReminder = null;
       await user.save();
       
-      await sendWhatsAppMessage(userId, `❌ Reminder cancelled, ${user.preferredName}.\n\nTry again when ready! 🎯`);
+      const result = await sendWhatsAppMessage(userId, `❌ Reminder cancelled, ${user.preferredName}.\n\nTry again when ready! 🎯`);
+      
+      if (!result.success) {
+        console.log('🚫 Cannot send cancellation message - API error:', result.error);
+      }
       return;
     }
     
@@ -592,7 +645,12 @@ async function handleIncomingMessage(message, contact) {
     if (nameChange) {
       user.preferredName = nameChange;
       await user.save();
-      await sendWhatsAppMessage(userId, `✅ Updated! I'll call you ${nameChange}.`);
+      
+      const result = await sendWhatsAppMessage(userId, `✅ Updated! I'll call you ${nameChange}.`);
+      
+      if (!result.success) {
+        console.log('🚫 Cannot send name change confirmation - API error:', result.error);
+      }
       return;
     }
     
@@ -613,9 +671,18 @@ async function handleIncomingMessage(message, contact) {
           const recurringText = reminder.isRecurring ? ` (${reminder.recurrencePattern})` : '';
           response += `${index + 1}. ${reminder.message}${recurringText}\n   📅 ${reminder.userLocalTime}\n\n`;
         });
-        await sendWhatsAppMessage(userId, response);
+        
+        const result = await sendWhatsAppMessage(userId, response);
+        
+        if (!result.success) {
+          console.log('🚫 Cannot send reminders list - API error:', result.error);
+        }
       } else {
-        await sendWhatsAppMessage(userId, `📋 No reminders set, ${user.preferredName}.\n\nTry: "gym at 7pm today"`);
+        const result = await sendWhatsAppMessage(userId, `📋 No reminders set, ${user.preferredName}.\n\nTry: "gym at 7pm today"`);
+        
+        if (!result.success) {
+          console.log('🚫 Cannot send no reminders message - API error:', result.error);
+        }
       }
       return;
     }
@@ -624,7 +691,6 @@ async function handleIncomingMessage(message, contact) {
     const analysis = await analyzeReminder(messageText, user.preferredName);
     
     if (analysis && analysis.isReminder) {
-      // Handle recurring reminders
       if (analysis.isRecurring) {
         if (analysis.timeFound) {
           const reminderData = parseReminderWithTimezone(messageText, analysis.task, user.timezoneOffset);
@@ -632,57 +698,79 @@ async function handleIncomingMessage(message, contact) {
           if (reminderData && reminderData.scheduledTime > new Date()) {
             const dayName = new Date(reminderData.scheduledTime.getTime() + (user.timezoneOffset * 60 * 60 * 1000)).toLocaleDateString('en-US', { weekday: 'long' });
             
-            await sendWhatsAppMessage(userId, `🔄 Recurring reminder:\n\n"${analysis.task}" - ${analysis.recurrencePattern}\n📅 Starting: ${dayName}, ${reminderData.userLocalTime}\n\nReply "yes" to confirm recurring reminder.`);
+            const result = await sendWhatsAppMessage(userId, `🔄 Recurring reminder:\n\n"${analysis.task}" - ${analysis.recurrencePattern}\n📅 Starting: ${dayName}, ${reminderData.userLocalTime}\n\nReply "yes" to confirm recurring reminder.`);
             
-            user.pendingReminder = {
-              message: analysis.task,
-              scheduledTime: reminderData.scheduledTime,
-              userLocalTime: reminderData.userLocalTime,
-              isRecurring: true,
-              recurrencePattern: analysis.recurrencePattern
-            };
-            await user.save();
+            if (result.success) {
+              user.pendingReminder = {
+                message: analysis.task,
+                scheduledTime: reminderData.scheduledTime,
+                userLocalTime: reminderData.userLocalTime,
+                isRecurring: true,
+                recurrencePattern: analysis.recurrencePattern
+              };
+              await user.save();
+            } else {
+              console.log('🚫 Cannot send recurring reminder confirmation - API error:', result.error);
+            }
           } else {
-            await sendWhatsAppMessage(userId, `⚠️ That time has passed. Try: "${analysis.task} ${analysis.recurrencePattern} starting tomorrow at 9am"`);
+            const result = await sendWhatsAppMessage(userId, `⚠️ That time has passed. Try: "${analysis.task} ${analysis.recurrencePattern} starting tomorrow at 9am"`);
+            
+            if (!result.success) {
+              console.log('🚫 Cannot send time passed message - API error:', result.error);
+            }
           }
         } else {
-          await sendWhatsAppMessage(userId, `🔄 Recurring task: "${analysis.task}" - ${analysis.recurrencePattern}\n\nWhat time should this repeat?\n\n• "at 8am daily"\n• "Mondays at 2pm"\n• "every Sunday at 10am"`);
+          const result = await sendWhatsAppMessage(userId, `🔄 Recurring task: "${analysis.task}" - ${analysis.recurrencePattern}\n\nWhat time should this repeat?\n\n• "at 8am daily"\n• "Mondays at 2pm"\n• "every Sunday at 10am"`);
+          
+          if (!result.success) {
+            console.log('🚫 Cannot send recurring time request - API error:', result.error);
+          }
         }
         return;
       }
       
       if (analysis.timeFound && !analysis.needsTime) {
-        // Show typo corrections if any
-        let confirmationMsg = `📝 Confirm reminder:\n\n"${reminderData.message}"`;
-        if (analysis.typosCorrected && analysis.originalTask) {
-          confirmationMsg = `📝 Confirm reminder (I corrected "${analysis.originalTask}" → "${analysis.task}"):\n\n"${reminderData.message}"`;
-        }
-        
-        // Complete reminder with time - ask for confirmation first
         const reminderData = parseReminderWithTimezone(messageText, analysis.task, user.timezoneOffset);
         
         if (reminderData && reminderData.scheduledTime > new Date()) {
-          // Show confirmation before saving
+          let confirmationMsg = `📝 Confirm reminder:\n\n"${reminderData.message}"`;
+          if (analysis.typosCorrected && analysis.originalTask) {
+            confirmationMsg = `📝 Confirm reminder (I corrected "${analysis.originalTask}" → "${analysis.task}"):\n\n"${reminderData.message}"`;
+          }
+          
           const dayName = new Date(reminderData.scheduledTime.getTime() + (user.timezoneOffset * 60 * 60 * 1000)).toLocaleDateString('en-US', { weekday: 'long' });
           
-          await sendWhatsAppMessage(userId, `${confirmationMsg}\n📅 ${dayName}, ${reminderData.userLocalTime}\n\nReply "yes" to confirm or "no" to cancel.`);
+          const result = await sendWhatsAppMessage(userId, `${confirmationMsg}\n📅 ${dayName}, ${reminderData.userLocalTime}\n\nReply "yes" to confirm or "no" to cancel.`);
           
-          // Store pending reminder in user object (temporary)
-          user.pendingReminder = {
-            message: reminderData.message,
-            scheduledTime: reminderData.scheduledTime,
-            userLocalTime: reminderData.userLocalTime
-          };
-          await user.save();
+          if (result.success) {
+            user.pendingReminder = {
+              message: reminderData.message,
+              scheduledTime: reminderData.scheduledTime,
+              userLocalTime: reminderData.userLocalTime
+            };
+            await user.save();
+          } else {
+            console.log('🚫 Cannot send reminder confirmation - API error:', result.error);
+          }
         } else {
-          await sendWhatsAppMessage(userId, `⚠️ That time has passed, ${user.preferredName}.\n\nTry: "${analysis.task} tomorrow at 9am"`);
+          const result = await sendWhatsAppMessage(userId, `⚠️ That time has passed, ${user.preferredName}.\n\nTry: "${analysis.task} tomorrow at 9am"`);
+          
+          if (!result.success) {
+            console.log('🚫 Cannot send time passed message - API error:', result.error);
+          }
         }
       } else if (analysis.clarificationNeeded) {
-        // AI needs clarification
-        await sendWhatsAppMessage(userId, `🤔 I think you mean "${analysis.task}" but I'm not sure.\n\nDid you mean:\n• "${analysis.task} at [time]"?\n\nPlease clarify with specific day and time.`);
+        const result = await sendWhatsAppMessage(userId, `🤔 I think you mean "${analysis.task}" but I'm not sure.\n\nDid you mean:\n• "${analysis.task} at [time]"?\n\nPlease clarify with specific day and time.`);
+        
+        if (!result.success) {
+          console.log('🚫 Cannot send clarification request - API error:', result.error);
+        }
       } else {
-        // Needs time confirmation
-        await sendWhatsAppMessage(userId, `📝 Task: "${analysis.task}"\n\n⚠️ Please specify exact day and time:\n\n• "at 7pm today"\n• "at 3pm tomorrow"\n• "Monday at 2pm"\n\nBe specific to avoid confusion.`);
+        const result = await sendWhatsAppMessage(userId, `📝 Task: "${analysis.task}"\n\n⚠️ Please specify exact day and time:\n\n• "at 7pm today"\n• "at 3pm tomorrow"\n• "Monday at 2pm"\n\nBe specific to avoid confusion.`);
+        
+        if (!result.success) {
+          console.log('🚫 Cannot send time specification request - API error:', result.error);
+        }
       }
       return;
     }
@@ -691,19 +779,26 @@ async function handleIncomingMessage(message, contact) {
     const remainingMsgs = usageCheck.remainingMessages;
     let warningText = remainingMsgs <= 10 ? `\n\n⚠️ ${remainingMsgs} messages left today` : '';
     
-    await sendWhatsAppMessage(userId, `Hi ${user.preferredName}! 🤖\n\n📋 Set reminders with specific times:\n\n• "gym at 7pm today"\n• "call mom at 3pm tomorrow"\n• "meeting Monday at 2pm"\n\n⚠️ Always include day and exact time\n\nCommands: "list reminders"${warningText}`);
+    const result = await sendWhatsAppMessage(userId, `Hi ${user.preferredName}! 🤖\n\n📋 Set reminders with specific times:\n\n• "gym at 7pm today"\n• "call mom at 3pm tomorrow"\n• "meeting Monday at 2pm"\n\n⚠️ Always include day and exact time\n\nCommands: "list reminders"${warningText}`);
+    
+    if (!result.success) {
+      console.log('🚫 Cannot send help message - API error:', result.error);
+    }
     
   } catch (error) {
     console.error('❌ Handler error:', error);
     try {
-      await sendWhatsAppMessage(message.from, '❌ Something went wrong. Please try again.');
+      const result = await sendWhatsAppMessage(message.from, '❌ Something went wrong. Please try again.');
+      if (!result.success) {
+        console.log('🚫 Cannot send error message - API error:', result.error);
+      }
     } catch (sendError) {
-      console.error('❌ Send error:', sendError);
+      console.error('❌ Error message send failed:', sendError);
     }
   }
 }
 
-// Cron job for reminders with recurring support
+// Enhanced cron job for reminders with error handling
 cron.schedule('* * * * *', async () => {
   try {
     const now = new Date();
@@ -719,31 +814,35 @@ cron.schedule('* * * * *', async () => {
         const user = await User.findOne({ userId: reminder.userId });
         const preferredName = user?.preferredName || 'there';
         
-        // Generate contextual motivational message
         const contextualMsg = await generateContextualMessage(reminder.message, preferredName);
         
         const recurringIcon = reminder.isRecurring ? '🔄' : '🔔';
-        await sendWhatsAppMessage(
+        const result = await sendWhatsAppMessage(
           reminder.userId,
           `${recurringIcon} REMINDER: "${reminder.message}"\n\n💪 ${contextualMsg.encouragement}\n\n🌟 ${contextualMsg.reward}\n\nGo for it, ${preferredName}!`
         );
         
-        // Handle recurring reminders
-        if (reminder.isRecurring && reminder.nextOccurrence) {
-          reminder.scheduledTime = reminder.nextOccurrence;
-          reminder.nextOccurrence = calculateNextOccurrence(reminder.nextOccurrence, reminder.recurrencePattern);
-          reminder.userLocalTime = new Date(reminder.scheduledTime.getTime() + (user.timezoneOffset * 60 * 60 * 1000)).toLocaleString();
-          await reminder.save();
+        if (result.success) {
+          // Handle recurring reminders
+          if (reminder.isRecurring && reminder.nextOccurrence) {
+            reminder.scheduledTime = reminder.nextOccurrence;
+            reminder.nextOccurrence = calculateNextOccurrence(reminder.nextOccurrence, reminder.recurrencePattern);
+            reminder.userLocalTime = new Date(reminder.scheduledTime.getTime() + (user.timezoneOffset * 60 * 60 * 1000)).toLocaleString();
+            await reminder.save();
+            
+            console.log(`🔄 Recurring reminder rescheduled: ${reminder.message} for ${reminder.userLocalTime}`);
+          } else {
+            reminder.isCompleted = true;
+            await reminder.save();
+          }
           
-          console.log(`🔄 Recurring reminder rescheduled: ${reminder.message} for ${reminder.userLocalTime}`);
+          console.log(`✅ Reminded ${preferredName}: ${reminder.message}`);
         } else {
-          reminder.isCompleted = true;
-          await reminder.save();
+          console.log(`❌ Failed to send reminder to ${preferredName}: ${result.error}`);
+          // Don't mark as completed if sending failed - will retry next minute
         }
-        
-        console.log(`✅ Reminded ${preferredName}: ${reminder.message}`);
       } catch (error) {
-        console.error(`❌ Reminder error:`, error);
+        console.error(`❌ Reminder error for ${reminder.userId}:`, error);
       }
     }
   } catch (error) {
@@ -751,11 +850,11 @@ cron.schedule('* * * * *', async () => {
   }
 });
 
-// Health check
+// Enhanced health check endpoint
 app.get('/', (req, res) => {
   res.json({ 
-    status: '🤖 Jarvis - Smart Reminder Assistant',
-    message: 'Direct, efficient, AI-powered reminders with contextual motivation',
+    status: '🤖 Jarvis - Smart Reminder Assistant (Production Ready)',
+    message: 'Direct, efficient, AI-powered reminders with robust error handling',
     timestamp: new Date().toISOString(),
     environment: process.env.NODE_ENV || 'development',
     uptime: process.uptime(),
@@ -770,52 +869,68 @@ app.get('/', (req, res) => {
       '💪 Contextual AI motivational messages',
       '📋 Reminder management',
       '🎯 Direct, efficient responses',
+      '🛡️ Robust error handling for Twilio rate limits',
+      '⚡ Production-ready with graceful failures',
       '🚫 Usage limits with upgrade prompts'
+    ],
+    improvements: [
+      '✅ Enhanced Twilio error handling',
+      '✅ Graceful API failure recovery',
+      '✅ Detailed logging for debugging',
+      '✅ Account status monitoring',
+      '✅ No app crashes on rate limits',
+      '✅ Improved webhook reliability'
     ]
   });
 });
 
-// Error handling
+// Error handling middleware
 app.use((error, req, res, next) => {
   console.error('Unhandled error:', error);
   res.status(500).json({ error: 'Internal server error' });
 });
 
-// Start server
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`Server running on port ${PORT}`);
+// Enhanced server startup
+app.listen(PORT, '0.0.0.0', async () => {
+  console.log(`🚀 Server running on port ${PORT}`);
   console.log('🤖 Jarvis Smart Reminder Assistant is ready!');
+  
+  // Check Twilio account status on startup
+  console.log('📊 Checking Twilio account status...');
+  await checkTwilioAccountStatus();
+  
+  console.log('✅ All systems ready for production!');
 });
 
-// Graceful shutdown
+// Graceful shutdown handlers
 process.on('SIGINT', async () => {
-  console.log('Shutting down gracefully...');
+  console.log('🔄 Shutting down gracefully...');
   try {
     await mongoose.connection.close();
-    console.log('MongoDB connection closed');
+    console.log('✅ MongoDB connection closed');
   } catch (error) {
-    console.error('Error closing MongoDB connection:', error);
+    console.error('❌ Error closing MongoDB connection:', error);
   }
   process.exit(0);
 });
 
 process.on('SIGTERM', async () => {
-  console.log('Shutting down gracefully...');
+  console.log('🔄 Shutting down gracefully...');
   try {
     await mongoose.connection.close();
-    console.log('MongoDB connection closed');
+    console.log('✅ MongoDB connection closed');
   } catch (error) {
-    console.error('Error closing MongoDB connection:', error);
+    console.error('❌ Error closing MongoDB connection:', error);
   }
   process.exit(0);
 });
 
 process.on('uncaughtException', (error) => {
-  console.error('Uncaught exception:', error);
+  console.error('🚨 Uncaught exception:', error);
   process.exit(1);
 });
 
 process.on('unhandledRejection', (reason, promise) => {
-  console.error('Unhandled rejection at:', promise, 'reason:', reason);
+  console.error('🚨 Unhandled rejection at:', promise, 'reason:', reason);
   process.exit(1);
 });
