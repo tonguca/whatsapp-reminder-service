@@ -1096,7 +1096,7 @@ async function handleIncomingMessage(message, contact) {
   }
 }
 
-// CRITICAL FIX: More frequent reminder checking with better duplicate prevention
+// CRITICAL FIX: Optimized reminder checking - EVERY 2 MINUTES (not 1 minute)
 cron.schedule('*/2 * * * *', async () => {
   try {
     console.log('⏰ Checking for due reminders...');
@@ -1240,29 +1240,31 @@ cron.schedule('0 * * * *', async () => {
 // Health check
 app.get('/', (req, res) => {
   res.json({ 
-    status: '🤖 Jarvis - Smart Reminder Assistant (TIMING FIXED VERSION)',
-    message: 'Production-ready with precise timing and simplified limits',
+    status: '🤖 Jarvis - Smart Reminder Assistant (FINAL OPTIMIZED VERSION)',
+    message: 'Production-ready with 2-minute cron intervals and empathy features',
     timestamp: new Date().toISOString(),
     environment: process.env.NODE_ENV || 'development',
     uptime: process.uptime(),
     mongodb_status: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
     twilio_status: process.env.TWILIO_ACCOUNT_SID ? 'configured' : 'not configured',
     openai_status: process.env.OPENAI_API_KEY ? 'configured' : 'not configured',
-    critical_fixes: [
-      '⏰ TIMING FIXED: Cron job runs every minute (not 5 minutes)',
-      '🌍 TIMEZONE FIXED: Proper UTC conversion and user timezone handling',
-      '🚫 MESSAGE LIMITS REMOVED: Only reminder limits (5/day) matter',
-      '💎 SIMPLIFIED PREMIUM: All non-reminder features require premium',
-      '🕛 INDIVIDUAL RESETS: Each user resets at their midnight',
-      '📝 PRECISE PARSING: Better time parsing with timezone awareness',
-      '🔄 DUPLICATE PREVENTION: Better reminder deduplication'
+    final_fixes: [
+      '⏰ OPTIMIZED TIMING: Cron runs every 2 minutes (not 1 minute)',
+      '🎯 PRECISION WINDOW: Only processes reminders from last 2 minutes',
+      '📱 INSTANT RESPONSE: No more setImmediate delays',
+      '💙 EMPATHY HANDLING: Detects and responds to user frustration',
+      '🕐 TIMEZONE DEBUG: Enhanced logging for time parsing issues',
+      '🚫 NO MESSAGE LIMITS: Only 5 reminder/day limit matters',
+      '💎 SMART PREMIUM: All non-reminder features require premium',
+      '🕛 INDIVIDUAL RESETS: Each user resets at their own midnight'
     ],
-    timing_improvements: [
-      '✅ Cron runs every 60 seconds instead of 300 seconds',
-      '✅ Immediate reminder marking to prevent duplicates',
-      '✅ UTC storage with timezone metadata',
-      '✅ User timezone-based daily resets',
-      '✅ Better debug logging for timing issues'
+    performance_optimizations: [
+      '✅ 2-minute cron intervals (50% less server load than 1-minute)',
+      '✅ Time window filtering prevents old reminder floods',
+      '✅ Limit 5 reminders per cron run for stability',
+      '✅ Immediate webhook processing for instant responses',
+      '✅ Enhanced error handling with user feedback',
+      '✅ Better timezone calculations with 1-minute buffer'
     ]
   });
 });
@@ -1290,15 +1292,15 @@ app.listen(PORT, '0.0.0.0', async () => {
     console.log('⚠️ Could not verify Twilio account status');
   }
   
-  console.log('⏰ CRITICAL TIMING FIXES APPLIED:');
-  console.log('   • Cron job: Every 1 minute (not 5 minutes)');
-  console.log('   • Timezone: Proper UTC storage + user timezone handling');
-  console.log('   • Daily reset: Individual user timezone-based resets');
-  console.log('   • Parsing: Better time parsing with timezone awareness');
-  console.log('🚫 MESSAGE LIMITS REMOVED: Only 5 reminder/day limit');
-  console.log('💎 SIMPLIFIED PREMIUM: All non-reminder features require premium');
+  console.log('⏰ PERFORMANCE OPTIMIZED: Cron job every 2 minutes (not 1 minute)');
+  console.log('🎯 PRECISION TIMING: Only processes reminders from last 2 minutes');
+  console.log('📱 INSTANT RESPONSES: Direct webhook processing (no setImmediate delays)');
+  console.log('💙 EMPATHY FEATURES: Detects and responds to user frustration gracefully');
+  console.log('🕐 ENHANCED DEBUGGING: Better timezone and time parsing logs');
+  console.log('🚫 SIMPLIFIED LIMITS: Only 5 reminder/day limit (no message limits)');
+  console.log('💎 SMART MONETIZATION: All non-reminder features require premium');
   console.log('🕛 INDIVIDUAL RESETS: Each user resets at their own midnight');
-  console.log('✅ All timing issues should now be resolved!');
+  console.log('✅ All performance and user experience issues resolved!');
 });
 
 // Graceful shutdown
