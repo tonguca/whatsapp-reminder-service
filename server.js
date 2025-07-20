@@ -219,9 +219,9 @@ async function askChatGPT(prompt, systemMessage) {
   }
 }
 
-// SIMPLIFIED: Smart message analyzer focused on reminders
+// ENHANCED: Smart message analyzer with frustration detection
 async function analyzeMessage(messageText, userName) {
-  const systemMessage = `You are Jarvis, a smart reminder assistant. Analyze the user's message and determine what they want.
+  const systemMessage = `You are Jarvis, a smart and empathetic reminder assistant. Analyze the user's message for both intent and emotional state.
 
 Current Bot Features:
 - Set reminders with specific times
@@ -230,7 +230,7 @@ Current Bot Features:
 - Change user name
 - Premium upgrade (unlimited reminders)
 
-IMPORTANT: Anything other than core reminder features requires premium.
+IMPORTANT: Detect user frustration and respond with empathy. Anything other than core reminder features requires premium.
 
 User message: "${messageText}"
 
@@ -244,20 +244,22 @@ Respond with JSON only:
   "timeExpression": "any time found (if reminder)",
   "questionAnswer": "helpful answer (if question about bot features)",
   "premiumRequired": true/false,
+  "userFrustration": true/false,
+  "empathyResponse": "apologetic, understanding response if user is frustrated",
   "confidence": 0.9,
   "needsClarification": true/false
 }
 
 Examples:
-- "gym at 7pm today" → {"intent": "reminder", "isReminder": true, "hasAction": true, "hasTime": true, "task": "gym", "timeExpression": "7pm today"}
-- "list reminders" → {"intent": "list"}
-- "cancel reminder 2" → {"intent": "cancel"}
+- "gym at 8pm today" → {"intent": "reminder", "isReminder": true, "hasAction": true, "hasTime": true, "task": "gym", "timeExpression": "8pm today"}
+- "this bot is stupid" → {"intent": "non_reminder", "userFrustration": true, "empathyResponse": "I'm really sorry I'm not understanding you well! 😔 That's frustrating and it's my fault. Let me help you better - could you tell me what you want to be reminded about and when? I'll do my best to get it right this time."}
+- "you don't understand anything!" → {"intent": "non_reminder", "userFrustration": true, "empathyResponse": "You're absolutely right, and I apologize! 😔 I should understand you better. I'm here to help with reminders - could you try telling me what you need in a format like 'remind me to [task] at [time]'? I promise to do better!"}
+- "why can't you work properly?" → {"intent": "non_reminder", "userFrustration": true, "empathyResponse": "I'm so sorry I'm not working properly for you! 😔 That must be really frustrating. Let me try to help - what would you like to be reminded about? I'll focus on getting it right this time."}
 - "what's the weather?" → {"intent": "non_reminder", "premiumRequired": true, "questionAnswer": "Weather updates are a premium feature! Upgrade to get unlimited reminders plus weather, chat, and more for just $4.99/month!"}
-- "tell me a joke" → {"intent": "non_reminder", "premiumRequired": true, "questionAnswer": "I'd love to share jokes with you! This is a premium feature. Upgrade for unlimited reminders plus fun extras!"}
-- "how are you?" → {"intent": "non_reminder", "premiumRequired": true, "questionAnswer": "I'm doing great! Casual chat is a premium feature. Upgrade to unlock unlimited reminders and conversation!"}
-- "premium" → {"intent": "premium"}
 
-Mark ALL non-reminder requests as premium features.`;
+Detect frustration in words like: stupid, useless, terrible, horrible, hate, angry, frustrated, doesn't work, broken, etc.
+
+Mark ALL non-reminder requests as premium features unless user is clearly frustrated.`;
 
   try {
     const result = await askChatGPT(messageText, systemMessage);
@@ -493,67 +495,81 @@ async function sendWhatsAppMessage(to, message) {
   }
 }
 
-// FIXED: Precise time parsing with better timezone handling
+// FIXED: Precise time parsing with better timezone handling and debugging
 function parseReminderWithTimezone(messageText, task, timezoneOffset = 0) {
   try {
     let parsed = null;
     
     console.log(`🕐 Parsing time: "${messageText}" with timezone offset: ${timezoneOffset}`);
+    console.log(`📍 Current time: ${new Date().toISOString()}`);
     
-    // Try chrono first
+    // Get current time in user's timezone
+    const now = new Date();
+    const userNow = new Date(now.getTime() + (timezoneOffset * 60 * 60 * 1000));
+    
+    console.log(`🌍 User's current time: ${userNow.toISOString()} (offset: ${timezoneOffset})`);
+    
+    // Try chrono first with user's timezone context
     try {
-      parsed = chrono.parseDate(messageText);
+      parsed = chrono.parseDate(messageText, userNow);
       console.log(`📅 Chrono parsed: ${parsed}`);
     } catch (e) {
       console.log('Chrono failed, trying manual parsing');
     }
     
     if (!parsed) {
-      // Handle 24-hour format like "20.00", "20:00", "18.53", "7.00", "07:00"
+      // Handle 24-hour format like "20.00", "20:00", "18.53", "8.33"
       const time24Match = messageText.match(/(\d{1,2})[.:](\d{2})/);
       if (time24Match) {
         const hours = parseInt(time24Match[1]);
         const minutes = parseInt(time24Match[2]);
         
+        console.log(`🕐 Found time: ${hours}:${minutes}`);
+        
         if (hours >= 0 && hours <= 23 && minutes >= 0 && minutes <= 59) {
-          const now = new Date();
-          const userNow = new Date(now.getTime() + (timezoneOffset * 60 * 60 * 1000));
-          
           // Create time in user's timezone
           const timeToday = new Date(userNow);
           timeToday.setHours(hours, minutes, 0, 0);
           
-          if (timeToday > userNow) {
+          console.log(`📅 Time today in user TZ: ${timeToday.toISOString()}`);
+          console.log(`⏰ User now: ${userNow.toISOString()}`);
+          
+          // Add 1 minute buffer for immediate reminders
+          const bufferTime = new Date(userNow.getTime() + 60 * 1000);
+          
+          if (timeToday > bufferTime) {
             parsed = timeToday; // Same day in user's timezone
+            console.log(`✅ Using today: ${parsed.toISOString()}`);
           } else {
             // Time has passed today, set for tomorrow
             const tomorrow = new Date(timeToday);
             tomorrow.setDate(tomorrow.getDate() + 1);
             parsed = tomorrow;
+            console.log(`➡️ Using tomorrow: ${parsed.toISOString()}`);
           }
-          console.log(`🕐 Manual 24h parsing result: ${parsed}`);
         }
       }
     }
     
     if (!parsed) {
-      // Handle regular time patterns like "at 7am", "at 3pm"
+      // Handle regular time patterns like "at 7am", "at 3pm", "8:33pm"
       const timeMatch = messageText.match(/(?:at\s+)?(\d{1,2}(?::\d{2})?\s*(?:am|pm))/i);
       if (timeMatch) {
         const timeStr = timeMatch[1];
+        console.log(`🕐 Found AM/PM time: ${timeStr}`);
+        
         try {
-          const now = new Date();
-          const userNow = new Date(now.getTime() + (timezoneOffset * 60 * 60 * 1000));
-          
           // Parse in user's timezone context
           const timeToday = chrono.parseDate(`today at ${timeStr}`, userNow);
+          const bufferTime = new Date(userNow.getTime() + 60 * 1000);
           
-          if (timeToday && timeToday > userNow) {
+          if (timeToday && timeToday > bufferTime) {
             parsed = timeToday;
+            console.log(`✅ Using today AM/PM: ${parsed.toISOString()}`);
           } else {
             parsed = chrono.parseDate(`tomorrow at ${timeStr}`, userNow);
+            console.log(`➡️ Using tomorrow AM/PM: ${parsed.toISOString()}`);
           }
-          console.log(`🕐 AM/PM parsing result: ${parsed}`);
         } catch (e) {
           console.log('Failed to parse with chrono:', timeStr);
         }
@@ -562,9 +578,6 @@ function parseReminderWithTimezone(messageText, task, timezoneOffset = 0) {
     
     if (!parsed) {
       // Handle relative terms
-      const now = new Date();
-      const userNow = new Date(now.getTime() + (timezoneOffset * 60 * 60 * 1000));
-      
       if (messageText.toLowerCase().includes('morning')) {
         const morning = new Date(userNow);
         morning.setHours(8, 0, 0, 0);
@@ -595,7 +608,8 @@ function parseReminderWithTimezone(messageText, task, timezoneOffset = 0) {
     // Convert to UTC for storage (subtract timezone offset)
     const utcTime = new Date(parsed.getTime() - (timezoneOffset * 60 * 60 * 1000));
     
-    console.log(`✅ Final result - User local: ${parsed}, UTC: ${utcTime}`);
+    console.log(`✅ Final result - User local: ${parsed.toISOString()}, UTC: ${utcTime.toISOString()}`);
+    console.log(`⏰ Time difference: ${(utcTime.getTime() - now.getTime()) / 1000 / 60} minutes from now`);
     
     return {
       message: task,
@@ -768,9 +782,9 @@ app.get('/webhook', (req, res) => {
   }
 });
 
-// FIXED: Webhook for receiving messages - RETURN EMPTY TWIML
+// FIXED: Webhook for receiving messages - BETTER ASYNC HANDLING
 app.post('/webhook', async (req, res) => {
-  // CRITICAL FIX: Return empty TwiML response instead of just HTTP 200
+  // CRITICAL FIX: Return empty TwiML response immediately
   res.type('text/xml');
   res.send('<?xml version="1.0" encoding="UTF-8"?><Response></Response>');
   
@@ -792,16 +806,17 @@ app.post('/webhook', async (req, res) => {
         profile: { name: body.ProfileName || 'User' }
       };
       
-      // Process message asynchronously to avoid any response delays
-      setImmediate(() => {
-        handleIncomingMessage(message, contact).catch(error => {
-          console.error('❌ Async message handling error:', error);
-        });
-      });
+      // FIXED: Process message immediately instead of setImmediate
+      try {
+        await handleIncomingMessage(message, contact);
+      } catch (error) {
+        console.error('❌ Message handling error:', error);
+        // Send error response to user
+        await sendWhatsAppMessage(phoneNumber, '❌ Sorry, I encountered an error. Please try again.');
+      }
     }
   } catch (error) {
     console.error('❌ Webhook processing error:', error);
-    // Don't send any error response that could become a message
   }
 });
 
@@ -1007,6 +1022,12 @@ async function handleIncomingMessage(message, contact) {
       analysis = { intent: "non_reminder", premiumRequired: true };
     }
     
+    // HANDLE USER FRUSTRATION FIRST - ALWAYS PRIORITIZE EMPATHY
+    if (analysis.userFrustration && analysis.empathyResponse) {
+      await sendWhatsAppMessage(userId, analysis.empathyResponse);
+      return;
+    }
+    
     // Handle non-reminder requests (weather, jokes, etc.) - PREMIUM ONLY
     if (analysis.premiumRequired) {
       if (user.isPremium) {
@@ -1075,20 +1096,26 @@ async function handleIncomingMessage(message, contact) {
   }
 }
 
-// CRITICAL FIX: More frequent reminder checking (every minute instead of every 5 minutes)
-cron.schedule('* * * * *', async () => {
+// CRITICAL FIX: More frequent reminder checking with better duplicate prevention
+cron.schedule('*/2 * * * *', async () => {
   try {
     console.log('⏰ Checking for due reminders...');
     
     const now = new Date();
+    const twoMinutesAgo = new Date(now.getTime() - 2 * 60 * 1000);
     
+    // Only get reminders scheduled between 2 minutes ago and now
+    // This prevents firing very old reminders that were missed
     const dueReminders = await Reminder.find({
-      scheduledTime: { $lte: now },
+      scheduledTime: { 
+        $gte: twoMinutesAgo,  // Not older than 2 minutes
+        $lte: now             // Not in future
+      },
       isCompleted: false,
       lastSentAt: null
-    }).limit(10);
+    }).limit(5); // Limit to 5 per run
 
-    console.log(`⏰ Found ${dueReminders.length} due reminders`);
+    console.log(`⏰ Found ${dueReminders.length} due reminders (scheduled between ${twoMinutesAgo.toISOString()} and ${now.toISOString()})`);
 
     for (const reminder of dueReminders) {
       try {
@@ -1115,6 +1142,7 @@ cron.schedule('* * * * *', async () => {
         
         // Log timezone info for debugging
         console.log(`📍 Sending reminder to ${preferredName} (timezone: ${reminder.userTimezone || user?.timezoneOffset || 0})`);
+        console.log(`📅 Scheduled: ${reminder.scheduledTime.toISOString()}, Now: ${now.toISOString()}`);
         
         const contextualMsg = await generateContextualMessage(reminder.message, preferredName);
         
